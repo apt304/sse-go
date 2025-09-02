@@ -26,21 +26,6 @@ const (
 	StateReconnecting
 )
 
-func (s ConnectionState) String() string {
-	switch s {
-	case StateDisconnected:
-		return "disconnected"
-	case StateConnecting:
-		return "connecting"
-	case StateConnected:
-		return "connected"
-	case StateReconnecting:
-		return "reconnecting"
-	default:
-		return "unknown"
-	}
-}
-
 // Options configures the SSE client
 type Options struct {
 	Reconnect  bool          // Enable automatic reconnection

@@ -66,7 +66,7 @@ func TestClientIntegration(t *testing.T) {
 	client.OnMessage(func(event sse.Event) {
 		receivedMessage = true
 		receivedEvents = append(receivedEvents, event)
-		t.Logf("Received message event: type=%s, data=%s, isHeartbeat=%v", event.Type, event.GetData(), event.IsHeartbeat())
+		t.Logf("Received message event: type=%s, data=%s, isHeartbeat=%v", event.Type, event.Data, event.IsHeartbeat())
 	})
 
 	// Connect

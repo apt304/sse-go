@@ -83,11 +83,6 @@ func (e Event) Write(w io.Writer) error {
 	return err
 }
 
-// GetData returns the event data as a string
-func (e Event) GetData() string {
-	return string(e.Data)
-}
-
 // IsHeartbeat returns true if this is a heartbeat event
 func (e Event) IsHeartbeat() bool {
 	return e.Type == EventTypeComment && string(e.Data) == string(heartbeatData)

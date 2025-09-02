@@ -10,9 +10,10 @@ import (
 func TestEvent(t *testing.T) {
 
 	var tests = []struct {
-		name     string
-		event    Event
-		expected string
+		name        string
+		event       Event
+		expected    string
+		isHeartbeat bool
 	}{
 		{
 			name:     "basic event",
@@ -36,13 +37,25 @@ func TestEvent(t *testing.T) {
 		},
 		{
 			name:     "event with comment",
-			event:    Event{Type: EventTypeComment, Data: []byte("hb")},
-			expected: ": hb\n\n",
+			event:    Event{Type: EventTypeComment, Data: []byte("a comment")},
+			expected: ": a comment\n\n",
 		},
 		{
 			name:     "event with comment and fields",
-			event:    Event{ID: "123", Type: EventTypeComment, Retry: 1000, Data: []byte("hb")},
-			expected: ": hb\n\n",
+			event:    Event{ID: "123", Type: EventTypeComment, Retry: 1000, Data: []byte("a comment")},
+			expected: ": a comment\n\n",
+		},
+		{
+			name:        "heartbeat",
+			event:       Event{ID: "123", Type: EventTypeComment, Retry: 1000, Data: []byte("hb")},
+			expected:    ": hb\n\n",
+			isHeartbeat: true,
+		},
+		{
+			name:        "heartbeat with fields",
+			event:       Event{ID: "123", Type: EventTypeComment, Retry: 1000, Data: []byte("hb")},
+			expected:    ": hb\n\n",
+			isHeartbeat: true,
 		},
 	}
 
@@ -55,6 +68,10 @@ func TestEvent(t *testing.T) {
 			err := tt.event.Write(&buf)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expected, buf.String())
+
+			assert.Equal(t, tt.isHeartbeat, tt.event.IsHeartbeat())
+
+			//assert.Equal(t, tt.event.GetData(), tt.expected)
 		})
 	}
 }
