@@ -8,14 +8,15 @@ import (
 )
 
 const (
-	EventTypeComment = "hb"
+	EventTypeComment = "comment"
 )
 
 // Pre-allocated heartbeat message to avoid allocations
 var (
+	heartbeatData    = []byte("hb")
 	heartbeatComment = Event{
 		Type: EventTypeComment,
-		Data: []byte("hb"),
+		Data: heartbeatData,
 	}
 )
 
@@ -80,4 +81,14 @@ func (e Event) Write(w io.Writer) error {
 	_, err := w.Write(builder.Bytes())
 
 	return err
+}
+
+// GetData returns the event data as a string
+func (e Event) GetData() string {
+	return string(e.Data)
+}
+
+// IsHeartbeat returns true if this is a heartbeat event
+func (e Event) IsHeartbeat() bool {
+	return e.Type == EventTypeComment && string(e.Data) == string(heartbeatData)
 }
