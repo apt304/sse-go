@@ -15,8 +15,7 @@ var (
 
 // Config holds SSE server configuration
 type Config struct {
-	HeartbeatIntervalSeconds int // 0 means no heartbeats
-	CORSOrigin               string
+	CORSOrigin string
 }
 
 type Server struct {
