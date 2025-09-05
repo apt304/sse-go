@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -18,6 +19,7 @@ var (
 		Type: EventTypeComment,
 		Data: heartbeatData,
 	}
+	heartbeatCommentBytes = []byte(heartbeatComment.String())
 )
 
 type Event struct {
@@ -64,23 +66,78 @@ func (e Event) Write(w io.Writer) error {
 	}
 
 	if e.ID != "" {
-		builder.WriteString(fmt.Sprintf("id: %s\n", e.ID))
+		_, err := builder.WriteString("id: ")
+		if err != nil {
+			return err
+		}
+
+		_, err = builder.WriteString(e.ID)
+		if err != nil {
+			return err
+		}
+
+		_, err = builder.WriteString("\n")
+		if err != nil {
+			return err
+		}
 	}
 
 	if e.Type != "" {
-		builder.WriteString(fmt.Sprintf("event: %s\n", e.Type))
+		_, err := builder.WriteString("event: ")
+		if err != nil {
+			return err
+		}
+
+		_, err = builder.WriteString(e.Type)
+		if err != nil {
+			return err
+		}
+
+		_, err = builder.WriteString("\n")
+		if err != nil {
+			return err
+		}
 	}
 
 	if e.Retry > 0 {
-		builder.WriteString(fmt.Sprintf("retry: %d\n", e.Retry))
+		_, err := builder.WriteString("retry: ")
+		if err != nil {
+			return err
+		}
+
+		_, err = builder.WriteString(strconv.Itoa(e.Retry))
+		if err != nil {
+			return err
+		}
+
+		_, err = builder.WriteString("\n")
+		if err != nil {
+			return err
+		}
 	}
 
 	// Add data field
-	builder.WriteString(fmt.Sprintf("data: %s\n\n", e.Data)) // Empty line to end the event
+	_, err := builder.WriteString("data: ")
+	if err != nil {
+		return err
+	}
 
-	_, err := w.Write(builder.Bytes())
+	_, err = builder.Write(e.Data)
+	if err != nil {
+		return err
+	}
 
-	return err
+	_, err = builder.WriteString("\n\n")
+	if err != nil {
+		return err
+	}
+
+	_, err = w.Write(builder.Bytes())
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // IsHeartbeat returns true if this is a heartbeat event

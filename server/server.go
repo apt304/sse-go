@@ -32,7 +32,7 @@ func NewServer(config Config, subscriber Subscriber) *Server {
 }
 
 // ServeHTTP handles SSE connections. Callers must not set the http status response after ServeHTTP returns. It automatically
-// returns 204 No Content when the connection successfully closes, and 500 Internal Server Error on error.
+// returns 200 OK for successful connections (default HTTP status), and 500 Internal Server Error on error.
 func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request, topics []string, lifecycleHooks LifecycleHooks) {
 	ctx := r.Context()
 
@@ -64,7 +64,10 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request, topics []strin
 
 	slog.DebugContext(ctx, "sse: session ended")
 
-	w.WriteHeader(http.StatusNoContent)
+	// Note: We don't call WriteHeader here because:
+	// 1. HTTP status should only be written once at the beginning
+	// 2. For successful SSE connections, the default 200 status is appropriate
+	// 3. Error cases already call http.Error which writes the status
 }
 
 // setSSEHeaders sets the appropriate headers for SSE

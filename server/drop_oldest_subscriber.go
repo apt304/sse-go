@@ -1,6 +1,7 @@
 package sse
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"slices"
@@ -57,7 +58,7 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 
 	subChan := &subscriptionChan{
 		Subscription: sub,
-		events:       make(chan Event, s.opts.Buffer),
+		events:       make(chan []byte, s.opts.Buffer),
 	}
 
 	s.mu.Lock()
@@ -123,10 +124,20 @@ func (s *DropOldestSubscriber) Publish(event Event, topics []string) error {
 	}
 	s.mu.RUnlock()
 
+	if len(subs) == 0 {
+		// No subscribers for the topics, do nothing
+		return nil
+	}
+
+	var eventBytes bytes.Buffer
+	if err := event.Write(&eventBytes); err != nil {
+		return err
+	}
+
 	// Send the event to the subscribers
 	for _, sub := range subs {
 		select {
-		case sub.events <- event:
+		case sub.events <- eventBytes.Bytes():
 		case <-s.close:
 			return ErrSubscriberClosed
 		default:
@@ -137,7 +148,7 @@ func (s *DropOldestSubscriber) Publish(event Event, topics []string) error {
 			}
 
 			select {
-			case sub.events <- event: // Try to send new event
+			case sub.events <- eventBytes.Bytes(): // Try to send new event
 			default:
 				// Still full, drop the event (slow client)
 			}
@@ -165,7 +176,7 @@ func (s *DropOldestSubscriber) Shutdown(ctx context.Context) error {
 
 type subscriptionChan struct {
 	Subscription
-	events chan Event
+	events chan []byte
 }
 
 func (s *DropOldestSubscriber) run(sub *subscriptionChan, lifecycleHooks LifecycleHooks, stop, done chan struct{}) {
@@ -185,7 +196,7 @@ func (s *DropOldestSubscriber) run(sub *subscriptionChan, lifecycleHooks Lifecyc
 		case <-stop:
 			return
 		case evt := <-sub.events:
-			if err := evt.Write(sub.rcw); err != nil {
+			if _, err := sub.rcw.Write(evt); err != nil {
 				// On write error, stop work and remove the subscriber
 				slog.Warn("subscriber write error", "error", err)
 				close(done)
@@ -214,7 +225,7 @@ func (s *DropOldestSubscriber) runHeartbeat(sub *subscriptionChan, stop chan str
 		case <-ticker.C:
 			// Send heartbeat non-blocking
 			select {
-			case sub.events <- heartbeatComment:
+			case sub.events <- heartbeatCommentBytes:
 			default:
 				// If they're saturated, don't make it worse
 			}
