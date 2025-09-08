@@ -35,12 +35,26 @@ func NewServer(config Config, subscriber Subscriber) *Server {
 func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request, topics []string, lifecycleHooks LifecycleHooks) {
 	ctx := r.Context()
 
+	if len(topics) == 0 {
+		err := ErrNoTopics
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	s.setSSEHeaders(w, r)
 
 	rc := http.NewResponseController(w)
-	err := rc.Flush()
+	_, err := w.Write(connectedCommentBytes)
 	if err != nil {
-		err = fmt.Errorf("unable to flush sse headers on connection: %w", err)
+		err = fmt.Errorf("unable to write sse headers and connected comment on connection: %w", err)
+		slog.WarnContext(ctx, "sse: unable to write sse headers and connected comment on connection", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	err = rc.Flush()
+	if err != nil {
+		err = fmt.Errorf("unable to flush sse headers and connected comment on connection: %w", err)
 		slog.WarnContext(ctx, "sse: unable to flush sse headers on connection", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -55,7 +69,7 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request, topics []strin
 	slog.DebugContext(ctx, "sse: subscribing session", "topics", sub.Topics, "lastEventID", sub.LastEventID)
 
 	if err = s.subscriber.Subscribe(ctx, sub, lifecycleHooks); err != nil {
-		slog.ErrorContext(ctx, "sse: subscribe error", "error", err)
+		slog.WarnContext(ctx, "sse: subscribe error", "error", err)
 
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

@@ -78,8 +78,11 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 	// Block until the context, the provider, or the subscriber done channel is closed.
 	select {
 	case <-ctx.Done():
+		slog.Debug("subscriber context done", "context", ctx.Err())
 	case <-s.close:
+		slog.Debug("subscriber closed")
 	case <-done:
+		slog.Debug("subscriber done")
 	}
 
 	// signal the subscriber and heartbeat workers to stop
@@ -180,15 +183,15 @@ type subscriptionChan struct {
 }
 
 func (s *DropOldestSubscriber) run(sub *subscriptionChan, lifecycleHooks LifecycleHooks, stop, done chan struct{}) {
-	// Signal that the subscriber is ready
-	if lifecycleHooks.OnConnect != nil {
-		go lifecycleHooks.OnConnect(sub.Subscription)
-	}
-
 	if lifecycleHooks.OnDisconnect != nil {
 		defer func() {
 			go lifecycleHooks.OnDisconnect(sub.Subscription)
 		}()
+	}
+
+	// Signal that the subscriber is ready
+	if lifecycleHooks.OnConnect != nil {
+		go lifecycleHooks.OnConnect(sub.Subscription)
 	}
 
 	for {

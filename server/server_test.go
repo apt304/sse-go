@@ -238,7 +238,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 
 				// Verify that the error message is written
 				body := nonFlushableWriter.body.String()
-				assert.Contains(t, body, "unable to flush sse headers on connection")
+				assert.Contains(t, body, "unable to flush sse headers and connected comment on connection")
 			})
 
 			t.Run("flush error after headers", func(t *testing.T) {
@@ -262,7 +262,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 
 				// Verify that the error message is written
 				body := flushErrorWriter.body.String()
-				assert.Contains(t, body, "unable to flush sse headers on connection")
+				assert.Contains(t, body, "unable to flush sse headers and connected comment on connection")
 			})
 
 			t.Run("subscribe error", func(t *testing.T) {

@@ -24,7 +24,7 @@ func TestClientIntegration(t *testing.T) {
 	}, subscriber)
 
 	// Create HTTP server with SSE endpoint
-	port := "8081"
+	port := "8888"
 	httpServer := &http.Server{
 		Addr: ":" + port,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -2,7 +2,6 @@ package sse
 
 import (
 	"bytes"
-	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -12,8 +11,14 @@ const (
 	EventTypeComment = "comment"
 )
 
-// Pre-allocated heartbeat message to avoid allocations
 var (
+	connectedComment = Event{
+		Type: EventTypeComment,
+		Data: []byte("connected"),
+	}
+	connectedCommentBytes = []byte(connectedComment.String())
+
+	// Pre-allocated heartbeat message to avoid allocations
 	heartbeatData    = []byte("hb")
 	heartbeatComment = Event{
 		Type: EventTypeComment,
@@ -32,26 +37,7 @@ type Event struct {
 
 func (e Event) String() string {
 	var builder strings.Builder
-
-	if e.Type == EventTypeComment {
-		builder.WriteString(fmt.Sprintf(": %s\n\n", e.Data))
-		return builder.String()
-	}
-
-	if e.ID != "" {
-		builder.WriteString(fmt.Sprintf("id: %s\n", e.ID))
-	}
-
-	if e.Type != "" {
-		builder.WriteString(fmt.Sprintf("event: %s\n", e.Type))
-	}
-
-	if e.Retry > 0 {
-		builder.WriteString(fmt.Sprintf("retry: %d\n", e.Retry))
-	}
-
-	// Add data field
-	builder.WriteString(fmt.Sprintf("data: %s\n\n", e.Data)) // Empty line to end the event
+	e.Write(&builder)
 
 	return builder.String()
 }
@@ -60,8 +46,17 @@ func (e Event) Write(w io.Writer) error {
 	var builder bytes.Buffer
 
 	if e.Type == EventTypeComment {
-		builder.WriteString(fmt.Sprintf(": %s\n\n", e.Data))
-		_, err := w.Write(builder.Bytes())
+		err := WriteLines(&builder, ": ", e.Data)
+		if err != nil {
+			return err
+		}
+
+		_, err = builder.WriteString("\n\n")
+		if err != nil {
+			return err
+		}
+
+		_, err = w.Write(builder.Bytes())
 		return err
 	}
 
@@ -116,13 +111,8 @@ func (e Event) Write(w io.Writer) error {
 		}
 	}
 
-	// Add data field
-	_, err := builder.WriteString("data: ")
-	if err != nil {
-		return err
-	}
-
-	_, err = builder.Write(e.Data)
+	// Add data fields. Each newline (/r, /n, /r/n) is written as a separate data field.
+	err := WriteLines(&builder, "data: ", e.Data)
 	if err != nil {
 		return err
 	}
@@ -133,6 +123,41 @@ func (e Event) Write(w io.Writer) error {
 	}
 
 	_, err = w.Write(builder.Bytes())
+
+	return err
+}
+
+// Each newline (/r, /n, /r/n) is written as a separate data field.
+func WriteLines(w io.Writer, prefix string, data []byte) error {
+	prevIdx := 0
+	nextIdx := 0
+	for nextIdx = 0; nextIdx < len(data); nextIdx++ {
+		if data[nextIdx] == '\r' || data[nextIdx] == '\n' {
+			// increment i if the next character is a newline
+			if nextIdx < len(data)-1 && data[nextIdx] == '\r' && data[nextIdx+1] == '\n' {
+				nextIdx++
+			}
+
+			_, err := w.Write([]byte(prefix))
+			if err != nil {
+				return err
+			}
+
+			_, err = w.Write(data[prevIdx : nextIdx+1])
+			if err != nil {
+				return err
+			}
+
+			prevIdx = nextIdx + 1
+		}
+	}
+
+	_, err := w.Write([]byte(prefix))
+	if err != nil {
+		return err
+	}
+
+	_, err = w.Write(data[prevIdx:])
 	if err != nil {
 		return err
 	}

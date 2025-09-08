@@ -36,6 +36,11 @@ func TestEvent(t *testing.T) {
 			expected: "id: 123\nevent: test\nretry: 1000\ndata: test\n\n",
 		},
 		{
+			name:     "event with ID, type, retry, and multiple data lines",
+			event:    Event{ID: "123", Type: "test", Retry: 1000, Data: []byte("test\nline2\rline3\r\nline4")},
+			expected: "id: 123\nevent: test\nretry: 1000\ndata: test\ndata: line2\rdata: line3\r\ndata: line4\n\n",
+		},
+		{
 			name:     "event with comment",
 			event:    Event{Type: EventTypeComment, Data: []byte("a comment")},
 			expected: ": a comment\n\n",
@@ -44,6 +49,11 @@ func TestEvent(t *testing.T) {
 			name:     "event with comment and fields",
 			event:    Event{ID: "123", Type: EventTypeComment, Retry: 1000, Data: []byte("a comment")},
 			expected: ": a comment\n\n",
+		},
+		{
+			name:     "event with multi-line comment",
+			event:    Event{ID: "123", Type: EventTypeComment, Retry: 1000, Data: []byte("a comment\nline2\rline3\r\nline4")},
+			expected: ": a comment\n: line2\r: line3\r\n: line4\n\n",
 		},
 		{
 			name:        "heartbeat",
