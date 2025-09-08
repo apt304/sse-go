@@ -229,7 +229,7 @@ func TestConnection_ReadEvents_EventParsing(t *testing.T) {
 	conn := NewConnection("http://localhost:8080/events", nil)
 
 	// Create a mock reader that returns valid SSE data
-	eventData := "id: 123\nevent: test\ndata: hello world\n\n"
+	eventData := "id: 123\nevent: test\ndata: hello world\rdata: line2\r\ndata: line3\n\n"
 	mockBody := &mockReadCloser{
 		readFunc: func(p []byte) (n int, err error) {
 			if len(eventData) == 0 {
@@ -259,7 +259,7 @@ func TestConnection_ReadEvents_EventParsing(t *testing.T) {
 	case event := <-eventChan:
 		assert.Equal(t, "123", event.ID, "Expected event ID to match")
 		assert.Equal(t, "test", event.Type, "Expected event type to match")
-		assert.Equal(t, "hello world", string(event.Data), "Expected event data to match")
+		assert.Equal(t, "hello world\nline2\nline3", string(event.Data), "Expected event data to match")
 	default:
 		assert.Fail(t, "Expected to receive parsed event")
 	}

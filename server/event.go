@@ -1,7 +1,9 @@
 package sse
 
 import (
+	"bufio"
 	"bytes"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -168,4 +170,150 @@ func WriteLines(w io.Writer, prefix string, data []byte) error {
 // IsHeartbeat returns true if this is a heartbeat event
 func (e Event) IsHeartbeat() bool {
 	return e.Type == EventTypeComment && string(e.Data) == string(heartbeatData)
+}
+
+// readLine reads a line from the reader, handling LF, CR, and CRLF line endings
+func readLine(reader *bufio.Reader) (string, error) {
+	var line []byte
+
+	for {
+		ch, err := reader.ReadByte()
+		if err != nil {
+			if err == io.EOF {
+				// Return the line even if we hit EOF (no final newline)
+				return string(line), io.EOF
+			}
+			return "", err
+		}
+
+		if ch == '\n' {
+			// Found LF - check if previous char was CR
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				// Remove the CR to handle CRLF
+				line = line[:len(line)-1]
+			}
+			return string(line), nil
+		} else if ch == '\r' {
+			// Found CR - check if next char is LF
+			nextCh, err := reader.ReadByte()
+			if err != nil {
+				if err == io.EOF {
+					// CR at end of stream
+					return string(line), nil
+				}
+				return "", err
+			}
+			if nextCh == '\n' {
+				// CRLF - return the line
+				return string(line), nil
+			} else {
+				// CR only - put the next char back and return
+				reader.UnreadByte()
+				return string(line), nil
+			}
+		} else {
+			// Regular character
+			line = append(line, ch)
+		}
+	}
+}
+
+// ParseEvent parses a single SSE event from a reader
+func ParseEvent(reader *bufio.Reader) (Event, error) {
+	var event Event
+	var dataLines []string
+
+	for {
+		line, err := readLine(reader)
+		if err != nil {
+			if err == io.EOF {
+				// Process the last line if it exists
+				if line != "" {
+					processLine(line, &event, &dataLines)
+				}
+
+				// If we have accumulated data, return the event
+				if event.ID != "" || event.Type != "" || len(dataLines) > 0 {
+					if len(dataLines) > 0 {
+						event.Data = []byte(strings.Join(dataLines, "\n"))
+					}
+					return event, nil
+				}
+				return Event{}, io.EOF
+			}
+			return Event{}, fmt.Errorf("read error: %w", err)
+		}
+
+		// Process the line
+		processLine(line, &event, &dataLines)
+
+		// Empty line indicates end of event
+		if line == "" {
+			if event.ID != "" || event.Type != "" || len(dataLines) > 0 {
+				// Join data lines with newlines to preserve multi-line data
+				if len(dataLines) > 0 {
+					event.Data = []byte(strings.Join(dataLines, "\n"))
+				}
+				return event, nil
+			}
+			continue
+		}
+	}
+}
+
+// processLine processes a single line and updates the event and dataLines
+func processLine(line string, event *Event, dataLines *[]string) {
+	// Parse event fields
+	if strings.HasPrefix(line, "id:") {
+		event.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+	} else if strings.HasPrefix(line, "event:") {
+		event.Type = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+	} else if strings.HasPrefix(line, "retry:") {
+		retryStr := strings.TrimSpace(strings.TrimPrefix(line, "retry:"))
+		if retry, err := strconv.Atoi(retryStr); err == nil {
+			event.Retry = retry
+		}
+	} else if strings.HasPrefix(line, "data:") {
+		// Handle multi-line data by collecting all data: lines
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		*dataLines = append(*dataLines, data)
+	} else if strings.HasPrefix(line, ":") {
+		// Comment line (heartbeat)
+		comment := strings.TrimSpace(strings.TrimPrefix(line, ":"))
+		if comment == "hb" {
+			event.Type = "hb"
+			event.Data = []byte("hb")
+		}
+		// Regular comments are ignored
+	}
+}
+
+// ParseEvents parses multiple SSE events from a reader and sends them to a channel
+func ParseEvents(reader *bufio.Reader, eventChan chan<- Event) error {
+	defer close(eventChan)
+
+	for {
+		event, err := ParseEvent(reader)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			// Send error event
+			select {
+			case eventChan <- Event{
+				Type: "error",
+				Data: []byte(fmt.Sprintf("parse error: %v", err)),
+			}:
+			default:
+			}
+			return err
+		}
+
+		// Send the parsed event
+		select {
+		case eventChan <- event:
+		default:
+			// Channel is full, skip this event
+		}
+	}
 }

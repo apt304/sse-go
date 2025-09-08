@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	sse "github.com/apt304/sse-go/server"
@@ -109,8 +108,6 @@ func (c *Connection) readEvents(body io.ReadCloser, eventChan chan<- sse.Event) 
 	defer close(eventChan)
 
 	reader := bufio.NewReader(body)
-	var currentEvent sse.Event
-	var dataLines []string
 
 	for {
 		select {
@@ -119,67 +116,28 @@ func (c *Connection) readEvents(body io.ReadCloser, eventChan chan<- sse.Event) 
 		default:
 		}
 
-		line, err := reader.ReadString('\n')
+		event, err := sse.ParseEvent(reader)
 		if err != nil {
 			if err == io.EOF {
 				return
 			}
 			// Send error event
-			eventChan <- sse.Event{
+			select {
+			case eventChan <- sse.Event{
 				Type: "error",
-				Data: []byte(fmt.Sprintf("read error: %v", err)),
+				Data: []byte(fmt.Sprintf("parse error: %v", err)),
+			}:
+			case <-c.ctx.Done():
+				return
 			}
 			return
 		}
 
-		line = strings.TrimSpace(line)
-
-		// Empty line indicates end of event
-		if line == "" {
-			if currentEvent.Type != "" || len(dataLines) > 0 {
-				// Join data lines with newlines
-				if len(dataLines) > 0 {
-					currentEvent.Data = []byte(strings.Join(dataLines, "\n"))
-				}
-
-				// Send the event
-				select {
-				case eventChan <- currentEvent:
-				case <-c.ctx.Done():
-					return
-				}
-
-				// Reset for next event
-				currentEvent = sse.Event{}
-				dataLines = nil
-			}
-			continue
-		}
-
-		// Parse event fields
-		if strings.HasPrefix(line, "id:") {
-			currentEvent.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
-		} else if strings.HasPrefix(line, "event:") {
-			currentEvent.Type = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-		} else if strings.HasPrefix(line, "retry:") {
-			retryStr := strings.TrimSpace(strings.TrimPrefix(line, "retry:"))
-			if retry, err := strconv.Atoi(retryStr); err == nil {
-				currentEvent.Retry = retry
-			}
-		} else if strings.HasPrefix(line, "data:") {
-			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			dataLines = append(dataLines, data)
-		} else if strings.HasPrefix(line, ":") {
-			// Comment line (heartbeat)
-			comment := strings.TrimSpace(strings.TrimPrefix(line, ":"))
-			if comment == "hb" {
-				// Send heartbeat event
-				select {
-				case eventChan <- sse.Event{Type: "hb", Data: []byte("hb")}:
-				case <-c.ctx.Done():
-					return
-				}
-			}
+		// Send the parsed event
+		select {
+		case eventChan <- event:
+		case <-c.ctx.Done():
+			return
 		}
 	}
 }
