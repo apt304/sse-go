@@ -238,7 +238,7 @@ func FuzzServer_DropOldestSubscriber_Matrix(f *testing.F) {
 			HeartbeatInterval: time.Duration(heartbeatMs) * time.Millisecond,
 		})
 
-		server := NewServer(Config{}, subscriber)
+		server := NewServer(subscriber)
 
 		// Create HTTP connections with deterministic topic sets and optional delay.
 		ctx, cancel := context.WithCancel(context.Background())

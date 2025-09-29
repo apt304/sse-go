@@ -1,17 +1,14 @@
 # SSE Go Library
 
-A minimal, high-performance Server-Sent Events (SSE) implementation in Go, following the HTML5 SSE specification. This library provides both server and client implementations for building real-time applications.
+A minimal, high-performance Server-Sent Events (SSE) implementation in Go. This library provides both server and client implementations for building real-time applications.
 
 ## Features
 
-- **SSE Protocol Compliance**: Full compliance with HTML5 SSE specification
-- **HTTP/1.1 & HTTP/2 Support**: Automatic protocol detection and appropriate header handling
 - **Topic-based Broadcasting**: Subscribe to specific topics for targeted event delivery
 - **Heartbeat Support**: Configurable heartbeat comments to keep connections alive
 - **Lifecycle Hooks**: Connection lifecycle callbacks (OnConnect, OnDisconnect)
 - **Graceful Shutdown**: Clean resource cleanup with synchronous shutdown
-- **CORS Support**: Configurable CORS headers for cross-origin requests
-- **Buffer Management**: Configurable per-subscriber event buffers with drop-oldest strategy
+- **Default Server Implementation**: Configurable per-subscriber event buffers with drop-oldest strategy
 - **Go Client**: High-level client API with automatic reconnection and event handling
 
 ## Installation
@@ -44,9 +41,7 @@ func main() {
     })
 
     // Create SSE server
-    sseServer := server.NewServer(server.Config{
-        CORSOrigin: "*", // Enable CORS
-    }, subscriber)
+    sseServer := server.NewServer(subscriber)
 
     // Create HTTP server
     mux := http.NewServeMux()
@@ -80,6 +75,7 @@ event := server.Event{
     Data: []byte("Hello, World!"),
 }
 
+// Send to "notifications" and "updates" topics
 err := sseServer.Publish(event, "notifications", "updates")
 if err != nil {
     log.Printf("Publish error: %v", err)
@@ -90,7 +86,7 @@ if err != nil {
 
 #### Core Types
 
-##### Event
+*Event*
 ```go
 type Event struct {
     ID    string // Event ID for reconnection support
@@ -100,7 +96,7 @@ type Event struct {
 }
 ```
 
-##### Subscription
+*Subscription*
 ```go
 type Subscription struct {
     LastEventID string   // Last event ID to resume from
@@ -108,7 +104,7 @@ type Subscription struct {
 }
 ```
 
-##### LifecycleHooks
+*LifecycleHooks*
 ```go
 type LifecycleHooks struct {
     OnConnect    func(sub Subscription) // Called after connection established
@@ -116,20 +112,11 @@ type LifecycleHooks struct {
 }
 ```
 
-#### Configuration
-
-##### Server Options
+*Server Options*
 ```go
 type Options struct {
     Buffer             int           // Per-subscriber event buffer size
     HeartbeatInterval  time.Duration // Heartbeat frequency (0 = disabled)
-}
-```
-
-##### Server Config
-```go
-type Config struct {
-    CORSOrigin string // CORS origin header value
 }
 ```
 
@@ -258,67 +245,3 @@ Topics can be specified when creating the client and will be sent as query param
 ```go
 client := NewClient("http://localhost:8080/events", []string{"user-events", "notifications"})
 ```
-
-### Client Error Handling
-
-The client provides comprehensive error handling:
-
-```go
-client.OnError(func(err error) {
-    switch {
-    case strings.Contains(err.Error(), "connection refused"):
-        log.Println("Server is down, will retry...")
-    case strings.Contains(err.Error(), "timeout"):
-        log.Println("Connection timeout, will retry...")
-    default:
-        log.Printf("Unexpected error: %v", err)
-    }
-})
-```
-
-### Client Thread Safety
-
-All client methods are thread-safe and can be called from multiple goroutines.
-
-## Web Client Example
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-    <title>SSE Client</title>
-</head>
-<body>
-    <div id="messages"></div>
-    <script>
-        const eventSource = new EventSource('/events');
-        const messagesDiv = document.getElementById('messages');
-
-        eventSource.onmessage = function(event) {
-            const message = document.createElement('div');
-            message.textContent = event.data;
-            messagesDiv.appendChild(message);
-        };
-
-        eventSource.onerror = function(event) {
-            console.error('SSE error:', event);
-        };
-    </script>
-</body>
-</html>
-```
-
-## Architecture
-
-The library is modular:
-
-- **Server**: Handles HTTP requests and SSE protocol details
-- **Subscriber**: Manages connections and event distribution
-- **Event**: Represents SSE events with proper formatting
-- **Client**: Go client for consuming SSE streams
-
-The `DropOldestSubscriber` implementation provides:
-- Topic-based event routing
-- Configurable event buffers
-- Automatic heartbeat support
-- Graceful connection cleanup

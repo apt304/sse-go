@@ -33,7 +33,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 				subscriber := tt.newSubscriber()
 				assert.NotNil(t, subscriber)
 
-				server := NewServer(Config{}, subscriber)
+				server := NewServer(subscriber)
 				assert.NotNil(t, server)
 
 				openedWg := sync.WaitGroup{}
@@ -71,7 +71,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 				subscriber := tt.newSubscriber()
 				assert.NotNil(t, subscriber)
 
-				server := NewServer(Config{}, subscriber)
+				server := NewServer(subscriber)
 				assert.NotNil(t, server)
 
 				// Set up three subscriptions with different topic combinations
@@ -210,7 +210,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 				subscriber := tt.newSubscriber()
 				assert.NotNil(t, subscriber)
 
-				server := NewServer(Config{}, subscriber)
+				server := NewServer(subscriber)
 				assert.NotNil(t, server)
 
 				err := server.Publish(Event{Data: []byte("message-A")})
@@ -221,7 +221,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 				subscriber := tt.newSubscriber()
 				assert.NotNil(t, subscriber)
 
-				server := NewServer(Config{}, subscriber)
+				server := NewServer(subscriber)
 				assert.NotNil(t, server)
 
 				// Create a non-flushable response writer
@@ -245,7 +245,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 				subscriber := tt.newSubscriber()
 				assert.NotNil(t, subscriber)
 
-				server := NewServer(Config{}, subscriber)
+				server := NewServer(subscriber)
 				assert.NotNil(t, server)
 
 				// Create a response writer that implements Flusher but fails on flush
@@ -273,7 +273,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 				err := subscriber.Shutdown(context.Background())
 				assert.NoError(t, err)
 
-				server := NewServer(Config{}, subscriber)
+				server := NewServer(subscriber)
 				assert.NotNil(t, server)
 
 				testResponseWriter := &testResponseWriter{}
@@ -294,7 +294,7 @@ func TestServer_SSEProtocol(t *testing.T) {
 	t.Run("basic SSE headers", func(t *testing.T) {
 		// Create test server
 		subscriber := NewDropOldestSubscriber(Options{})
-		server := NewServer(Config{}, subscriber)
+		server := NewServer(subscriber)
 
 		w := httptest.NewRecorder()
 		req := httptest.NewRequest("GET", "/", nil)
@@ -328,48 +328,10 @@ func TestServer_SSEProtocol(t *testing.T) {
 		assert.Equal(t, "no-cache", cacheControl)
 	})
 
-	t.Run("CORS headers", func(t *testing.T) {
-		// Test with CORS enabled
-		subscriber := NewDropOldestSubscriber(Options{})
-		corsServer := NewServer(Config{CORSOrigin: "*"}, subscriber)
-
-		w := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/", nil)
-
-		connected := make(chan struct{})
-		disconnected := make(chan struct{})
-		hooks := LifecycleHooks{
-			OnConnect: func(sub Subscription) {
-				close(connected)
-			},
-			OnDisconnect: func(sub Subscription) {
-				close(disconnected)
-			},
-		}
-
-		go corsServer.ServeHTTP(w, req, []string{"test-topic"}, hooks)
-
-		<-connected
-
-		corsServer.Shutdown(context.Background())
-
-		<-disconnected
-
-		result := w.Result()
-
-		// Verify that CORS headers are set when configured
-		cors := result.Header.Get("Access-Control-Allow-Origin")
-		assert.Equal(t, "*", cors)
-
-		// Verify that SSE headers are still set correctly
-		contentType := result.Header.Get("Content-Type")
-		assert.Equal(t, "text/event-stream", contentType)
-	})
-
 	t.Run("header passthrough", func(t *testing.T) {
 		// Test that additional headers set before ServeHTTP are preserved
 		subscriber := NewDropOldestSubscriber(Options{})
-		server := NewServer(Config{}, subscriber)
+		server := NewServer(subscriber)
 
 		w := httptest.NewRecorder()
 		w.Header().Set("X-Custom-Header", "custom-value")
@@ -421,7 +383,7 @@ func TestServer_SSEProtocol(t *testing.T) {
 
 func TestServer_HTTPCompatibility(t *testing.T) {
 	subscriber := NewDropOldestSubscriber(Options{})
-	server := NewServer(Config{}, subscriber)
+	server := NewServer(subscriber)
 
 	// Test HTTP/1.1
 	t.Run("HTTP/1.1", func(t *testing.T) {
@@ -454,34 +416,9 @@ func TestServer_HTTPCompatibility(t *testing.T) {
 	})
 }
 
-// func TestEventFormatting(t *testing.T) {
-// 	// Test basic event using the Event.String() method
-// 	event := Event{
-// 		Data: []byte("Hello, World!"),
-// 	}
-// 	formatted := event.String()
-// 	expected := "data: Hello, World!\n\n"
-// 	if formatted != expected {
-// 		t.Errorf("Expected %q, got %q", expected, formatted)
-// 	}
-
-// 	// Test event with all fields
-// 	event = Event{
-// 		ID:    "123",
-// 		Type:  "message",
-// 		Data:  []byte("Test message"),
-// 		Retry: 5000,
-// 	 }
-// 	formatted = event.String()
-// 	expected = "id: 123\nevent: message\nretry: 5000\ndata: Test message\n\n"
-// 	if formatted != expected {
-// 		t.Errorf("Expected %q, got %q", expected, formatted)
-// 	}
-// }
-
 func TestLastEventID(t *testing.T) {
 	subscriber := NewDropOldestSubscriber(Options{})
-	server := NewServer(Config{}, subscriber)
+	server := NewServer(subscriber)
 
 	// Create request with Last-Event-ID header
 	req := httptest.NewRequest("GET", "/events", nil)

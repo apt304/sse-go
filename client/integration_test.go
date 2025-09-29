@@ -19,9 +19,7 @@ func TestClientIntegration(t *testing.T) {
 	})
 
 	// Create SSE server
-	sseServer := sse.NewServer(sse.Config{
-		CORSOrigin: "*",
-	}, subscriber)
+	sseServer := sse.NewServer(subscriber)
 
 	// Create HTTP server with SSE endpoint
 	port := "8888"

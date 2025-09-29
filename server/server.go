@@ -13,19 +13,12 @@ var (
 	ErrFlusherNotSupported = fmt.Errorf("response writer does not implement http.Flusher")
 )
 
-// Config holds SSE server configuration
-type Config struct {
-	CORSOrigin string
-}
-
 type Server struct {
-	config     Config
 	subscriber Subscriber
 }
 
-func NewServer(config Config, subscriber Subscriber) *Server {
+func NewServer(subscriber Subscriber) *Server {
 	return &Server{
-		config:     config,
 		subscriber: subscriber,
 	}
 }
@@ -93,11 +86,6 @@ func (s Server) setSSEHeaders(w http.ResponseWriter, r *http.Request) {
 	if r.ProtoMajor == 1 {
 		w.Header().Set("Connection", "keep-alive")
 		w.Header().Set("Keep-Alive", "timeout=60")
-	}
-
-	// Set CORS headers if enabled
-	if s.config.CORSOrigin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", s.config.CORSOrigin)
 	}
 }
 
