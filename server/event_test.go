@@ -248,69 +248,6 @@ func TestParseEvent_EOF(t *testing.T) {
 	assert.Equal(t, []byte("hello"), event.Data)
 }
 
-func TestParseEvents(t *testing.T) {
-	input := `id: 1
-data: first event
-
-id: 2
-event: test
-data: second event
-
-id: 3
-data: third event
-data: with multiple lines
-
-`
-
-	reader := bufio.NewReader(strings.NewReader(input))
-	eventChan := make(chan Event, 10)
-
-	go func() {
-		err := ParseEvents(reader, eventChan)
-		assert.NoError(t, err)
-	}()
-
-	// Collect events
-	var events []Event
-	for event := range eventChan {
-		events = append(events, event)
-	}
-
-	assert.Len(t, events, 3)
-
-	// First event
-	assert.Equal(t, "1", events[0].ID)
-	assert.Equal(t, []byte("first event"), events[0].Data)
-
-	// Second event
-	assert.Equal(t, "2", events[1].ID)
-	assert.Equal(t, "test", events[1].Type)
-	assert.Equal(t, []byte("second event"), events[1].Data)
-
-	// Third event
-	assert.Equal(t, "3", events[2].ID)
-	assert.Equal(t, []byte("third event\nwith multiple lines"), events[2].Data)
-}
-
-func TestParseEvents_ErrorHandling(t *testing.T) {
-	// Test with a reader that returns an error
-	errorReader := &errorReader{err: io.ErrUnexpectedEOF}
-	reader := bufio.NewReader(errorReader)
-	eventChan := make(chan Event, 1)
-
-	err := ParseEvents(reader, eventChan)
-	assert.Error(t, err)
-
-	// Should receive an error event
-	select {
-	case event := <-eventChan:
-		assert.Equal(t, "error", event.Type)
-		assert.Contains(t, string(event.Data), "parse error")
-	default:
-		t.Fatal("Expected to receive error event")
-	}
-}
-
 // errorReader is a test helper that always returns an error
 type errorReader struct {
 	err error

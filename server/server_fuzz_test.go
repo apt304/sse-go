@@ -174,7 +174,7 @@ func FuzzDropOldestSubscriber_Matrix(f *testing.F) {
 		for i := 0; i < msgCount; i++ {
 			topic := topics[i%topicCount]
 			evt := Event{Type: topic, Data: []byte("x")}
-			if err := subscriber.Publish(evt, []string{topic}); err != nil {
+			if err := subscriber.Publish(evt, topic); err != nil {
 				// Only acceptable error during the run would be ErrClosed (if we ever closed early).
 				if !errors.Is(err, ErrSubscriberClosed) {
 					t.Fatalf("publish error: %v", err)
@@ -198,7 +198,7 @@ func FuzzDropOldestSubscriber_Matrix(f *testing.F) {
 		}
 
 		// Post-shutdown publish should error deterministically.
-		if err := subscriber.Publish(Event{}, []string{topics[0]}); !errors.Is(err, ErrSubscriberClosed) {
+		if err := subscriber.Publish(Event{}, topics[0]); !errors.Is(err, ErrSubscriberClosed) {
 			t.Fatalf("publish after shutdown should return ErrSubscriberClosed, got %v", err)
 		}
 	})

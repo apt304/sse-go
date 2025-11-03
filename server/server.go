@@ -94,7 +94,7 @@ func (s *Server) Publish(event Event, topics ...string) error {
 		return ErrNoTopics
 	}
 
-	return s.subscriber.Publish(event, topics)
+	return s.subscriber.Publish(event, topics...)
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

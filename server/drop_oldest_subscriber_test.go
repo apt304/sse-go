@@ -321,7 +321,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 
 		err = subscriber.Publish(Event{
 			Data: []byte("test"),
-		}, []string{"test"})
+		}, "test")
 		assert.ErrorIs(t, err, ErrSubscriberClosed)
 	})
 
@@ -331,7 +331,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 
 		err := subscriber.Publish(Event{
 			Data: []byte("test"),
-		}, nil)
+		})
 		assert.ErrorIs(t, err, ErrNoTopics)
 	})
 
@@ -341,7 +341,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 
 		err := subscriber.Publish(Event{
 			Data: []byte("test"),
-		}, []string{})
+		})
 		assert.ErrorIs(t, err, ErrNoTopics)
 	})
 
@@ -385,7 +385,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 			go func() {
 				err := subscriber.Publish(Event{
 					Data: data,
-				}, []string{"test"})
+				}, "test")
 				assert.NoError(t, err)
 			}()
 		}
@@ -430,7 +430,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 
 		err := subscriber.Publish(Event{
 			Data: []byte("test 0"),
-		}, []string{"test"})
+		}, "test")
 		assert.NoError(t, err)
 
 		closeChan := make(chan struct{})
@@ -439,7 +439,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		go func() {
 			err = subscriber.Publish(Event{
 				Data: []byte("test 1"),
-			}, []string{"test"})
+			}, "test")
 			assert.NoError(t, err)
 
 			// Unlock the writer
@@ -449,7 +449,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 
 			err = subscriber.Publish(Event{
 				Data: []byte("test 2"),
-			}, []string{"test"})
+			}, "test")
 			assert.NoError(t, err)
 
 			close(closeChan)
@@ -494,7 +494,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 
 		err := subscriber.Publish(Event{
 			Data: []byte("test"),
-		}, []string{"test"})
+		}, "test")
 		assert.NoError(t, err)
 
 		time.Sleep(100 * time.Millisecond)
@@ -530,7 +530,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 
 		err := subscriber.Publish(Event{
 			Data: []byte("test"),
-		}, []string{"test"})
+		}, "test")
 		assert.NoError(t, err)
 
 		time.Sleep(100 * time.Millisecond)

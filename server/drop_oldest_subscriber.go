@@ -101,7 +101,7 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 	return nil
 }
 
-func (s *DropOldestSubscriber) Publish(event Event, topics []string) error {
+func (s *DropOldestSubscriber) Publish(event Event, topics ...string) error {
 	select {
 	case <-s.close:
 		return ErrSubscriberClosed
@@ -154,6 +154,7 @@ func (s *DropOldestSubscriber) Publish(event Event, topics []string) error {
 			case sub.events <- eventBytes.Bytes(): // Try to send new event
 			default:
 				// Still full, drop the event (slow client)
+				slog.Warn("subscriber buffer full, dropping event", "topics", topics, "eventId", event.ID)
 			}
 		}
 	}

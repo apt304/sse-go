@@ -27,7 +27,7 @@ func TestClient_Options(t *testing.T) {
 	assert.True(t, client.options.Reconnect, "Expected reconnect to be true by default")
 	assert.Equal(t, 1*time.Second, client.options.Backoff, "Expected backoff to be 1s")
 	assert.Equal(t, 30*time.Second, client.options.MaxBackoff, "Expected maxBackoff to be 30s")
-	assert.Equal(t, 10, client.options.MaxRetries, "Expected maxRetries to be 10")
+	assert.Equal(t, 3, client.options.MaxRetries, "Expected maxRetries to be 3")
 
 	// Test custom options
 	client = NewClient("http://localhost:8080/events", nil, Options{
@@ -132,7 +132,7 @@ func TestClient_Disconnect(t *testing.T) {
 }
 
 func TestNewConnection(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", []string{"test"})
+	conn := NewConnection("http://localhost:8080/events", 100, "test")
 
 	assert.Equal(t, "http://localhost:8080/events", conn.url, "Expected URL to be 'http://localhost:8080/events'")
 	assert.Equal(t, []string{"test"}, conn.topics, "Expected topics to be ['test']")
@@ -140,7 +140,7 @@ func TestNewConnection(t *testing.T) {
 }
 
 func TestConnection_SetHeader(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", nil)
+	conn := NewConnection("http://localhost:8080/events", 100)
 
 	conn.SetHeader("X-Custom", "value")
 
@@ -148,7 +148,7 @@ func TestConnection_SetHeader(t *testing.T) {
 }
 
 func TestConnection_SetLastEventID(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", nil)
+	conn := NewConnection("http://localhost:8080/events", 100)
 
 	conn.SetLastEventID("event-123")
 
@@ -156,7 +156,7 @@ func TestConnection_SetLastEventID(t *testing.T) {
 }
 
 func TestConnection_IsClosed(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", nil)
+	conn := NewConnection("http://localhost:8080/events", 100)
 
 	assert.False(t, conn.IsClosed(), "Expected connection to not be closed initially")
 
@@ -226,7 +226,7 @@ func TestEvent_String_NoFields(t *testing.T) {
 }
 
 func TestConnection_ReadEvents_EventParsing(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", nil)
+	conn := NewConnection("http://localhost:8080/events", 100)
 
 	// Create a mock reader that returns valid SSE data
 	eventData := "id: 123\nevent: test\ndata: hello world\rdata: line2\r\ndata: line3\n\n"
@@ -494,4 +494,25 @@ func TestClient_HandleDisconnection_SuccessfulReconnection(t *testing.T) {
 	finalState := client.GetState()
 	assert.True(t, finalState == StateConnected || finalState == StateDisconnected,
 		"Expected final state to be either connected or disconnected after reconnection attempts")
+}
+
+func TestClient_NoRetry(t *testing.T) {
+	// Test that reconnection logic completes and sets final state correctly
+	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
+		Reconnect:  true,
+		Backoff:    1 * time.Millisecond, // Very fast for testing
+		MaxRetries: 0,
+	})
+
+	// Set initial state
+	client.setState(StateConnected)
+
+	// This should trigger reconnection logic
+	go client.handleDisconnection()
+
+	// Wait for max retries to be exceeded and final state to be set
+	time.Sleep(100 * time.Millisecond)
+
+	// Should end up disconnected after max retries
+	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
 }

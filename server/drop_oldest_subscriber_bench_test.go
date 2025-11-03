@@ -159,7 +159,7 @@ func BenchmarkDropOldestSubscriber(b *testing.B) {
 			// Publish messages
 			for b.Loop() {
 				time.Sleep(20 * time.Microsecond)
-				if err := subscriber.Publish(evt, topics); err != nil {
+				if err := subscriber.Publish(evt, topics...); err != nil {
 					b.Fatalf("publish error: %v", err)
 				}
 			}

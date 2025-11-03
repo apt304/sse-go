@@ -10,6 +10,10 @@ import (
 	sse "github.com/apt304/sse-go/server"
 )
 
+var (
+	ErrClientAlreadyConnected = fmt.Errorf("client already connected")
+)
+
 // EventHandler is a function that handles SSE events
 type EventHandler func(event sse.Event)
 
@@ -28,13 +32,14 @@ const (
 
 // Options configures the SSE client
 type Options struct {
-	Reconnect  bool          // Enable automatic reconnection
-	Backoff    time.Duration // Initial reconnection backoff
-	MaxBackoff time.Duration // Maximum reconnection backoff
-	MaxRetries int           // Maximum number of reconnection attempts (0 = unlimited)
+	Buffer     int           // Per-subscriber channel capacity. Default is 10.
+	Reconnect  bool          // Enable automatic reconnection. Default is true.
+	Backoff    time.Duration // Initial reconnection backoff. Default is 1 second.
+	MaxBackoff time.Duration // Maximum reconnection backoff. Default is 30 seconds.
+	MaxRetries int           // Maximum number of reconnection attempts. Default is 3.
 }
 
-// Client represents an SSE client with automatic reconnection
+// Client represents an SSE client
 type Client struct {
 	mu   sync.RWMutex
 	done chan struct{}
@@ -49,6 +54,7 @@ type Client struct {
 	topics  []string
 	options Options
 
+	lastEventMu    sync.RWMutex
 	lastEventID    string
 	eventHandlers  map[string][]EventHandler
 	messageHandler EventHandler
@@ -58,10 +64,11 @@ type Client struct {
 // NewClient creates a new SSE client
 func NewClient(url string, topics []string, opts ...Options) *Client {
 	options := Options{
+		Buffer:     10,
 		Reconnect:  true,
 		Backoff:    1 * time.Second,
 		MaxBackoff: 30 * time.Second,
-		MaxRetries: 10, // Default to 10 retry attempts
+		MaxRetries: 3,
 	}
 
 	// Apply any provided options
@@ -111,17 +118,25 @@ func (c *Client) OnError(handler ErrorHandler) {
 	c.errorHandler = handler
 }
 
-// Connect establishes the SSE connection
+// Connect establishes the SSE connection. An error is returned if the client is already connected.
 func (c *Client) Connect() error {
-	c.setState(StateConnecting)
+	c.connMu.Lock()
 
-	conn := NewConnection(c.url, c.topics)
+	if c.conn != nil {
+		c.connMu.Unlock()
+		return ErrClientAlreadyConnected
+	}
+
+	conn := NewConnection(c.url, c.options.Buffer, c.topics...)
+	c.lastEventMu.RLock()
 	if c.lastEventID != "" {
 		conn.SetLastEventID(c.lastEventID)
 	}
+	c.lastEventMu.RUnlock()
 
-	c.connMu.Lock()
 	c.conn = conn
+	c.setState(StateConnecting)
+
 	c.connMu.Unlock()
 
 	eventChan, err := conn.Connect()
@@ -159,7 +174,9 @@ func (c *Client) handleEvents(eventChan <-chan sse.Event) {
 func (c *Client) handleEvent(event sse.Event) {
 	// Update last event ID for reconnection
 	if event.ID != "" {
+		c.lastEventMu.Lock()
 		c.lastEventID = event.ID
+		c.lastEventMu.Unlock()
 	}
 
 	// Handle heartbeat events
@@ -188,7 +205,8 @@ func (c *Client) handleEvent(event sse.Event) {
 func (c *Client) handleDisconnection() {
 	c.setState(StateDisconnected)
 
-	if !c.options.Reconnect {
+	if !c.options.Reconnect || c.options.MaxRetries <= 0 {
+		slog.Info("client disconnected without retry")
 		return
 	}
 
@@ -211,7 +229,7 @@ func (c *Client) handleDisconnection() {
 
 				// Check if we've exceeded max retries
 				if c.options.MaxRetries > 0 && retryCount >= c.options.MaxRetries {
-					slog.Error("max reconnection attempts exceeded", "maxRetries", c.options.MaxRetries)
+					slog.Warn("max reconnection attempts exceeded", "maxRetries", c.options.MaxRetries)
 					c.setState(StateDisconnected)
 
 					// Call error handler if set
@@ -270,5 +288,7 @@ func (c *Client) IsConnected() bool {
 
 // GetLastEventID returns the last event ID received
 func (c *Client) GetLastEventID() string {
+	c.lastEventMu.RLock()
+	defer c.lastEventMu.RUnlock()
 	return c.lastEventID
 }

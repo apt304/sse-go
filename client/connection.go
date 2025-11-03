@@ -7,23 +7,26 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	sse "github.com/apt304/sse-go/server"
 )
 
 // Connection represents an SSE connection to the server
 type Connection struct {
-	client      *http.Client
-	url         string
-	topics      []string
-	lastEventID string
-	headers     map[string]string
-	ctx         context.Context
-	cancel      context.CancelFunc
+	client        *http.Client
+	url           string
+	buffer        int
+	topics        []string
+	lastEventIDMu sync.RWMutex
+	lastEventID   string
+	headers       map[string]string
+	ctx           context.Context
+	cancel        context.CancelFunc
 }
 
 // NewConnection creates a new SSE connection
-func NewConnection(url string, topics []string) *Connection {
+func NewConnection(url string, buffer int, topics ...string) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Connection{
@@ -31,6 +34,7 @@ func NewConnection(url string, topics []string) *Connection {
 			Timeout: 0, // No timeout for SSE connections
 		},
 		url:     url,
+		buffer:  buffer,
 		topics:  topics,
 		headers: make(map[string]string),
 		ctx:     ctx,
@@ -45,6 +49,8 @@ func (c *Connection) SetHeader(key, value string) {
 
 // SetLastEventID sets the Last-Event-ID header for reconnection
 func (c *Connection) SetLastEventID(id string) {
+	c.lastEventIDMu.Lock()
+	defer c.lastEventIDMu.Unlock()
 	c.lastEventID = id
 }
 
@@ -60,9 +66,11 @@ func (c *Connection) Connect() (<-chan sse.Event, error) {
 	req.Header.Set("Cache-Control", "no-cache")
 
 	// Set Last-Event-ID if provided
+	c.lastEventIDMu.RLock()
 	if c.lastEventID != "" {
 		req.Header.Set("Last-Event-ID", c.lastEventID)
 	}
+	c.lastEventIDMu.RUnlock()
 
 	// Set custom headers
 	for key, value := range c.headers {
@@ -95,7 +103,7 @@ func (c *Connection) Connect() (<-chan sse.Event, error) {
 		return nil, fmt.Errorf("invalid content type: %s", contentType)
 	}
 
-	eventChan := make(chan sse.Event, 100)
+	eventChan := make(chan sse.Event, c.buffer)
 
 	go c.readEvents(resp.Body, eventChan)
 

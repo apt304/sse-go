@@ -8,14 +8,14 @@ import (
 
 type Subscriber interface {
 	Subscribe(ctx context.Context, subscription Subscription, lifecycleHooks LifecycleHooks) error
-	Publish(message Event, topics []string) error
+	Publish(event Event, topics ...string) error
 	Shutdown(ctx context.Context) error
 }
 
 type Subscription struct {
 	// The last event ID to resume from.
 	LastEventID string
-	// The topics to receive message from. Must be a non-empty list.
+	// The topics to receive events from. Must be a non-empty list.
 	Topics []string
 
 	// The response writer to use for sending events.

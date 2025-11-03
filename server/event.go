@@ -287,33 +287,3 @@ func processLine(line string, event *Event, dataLines *[]string) {
 		// Regular comments are ignored
 	}
 }
-
-// ParseEvents parses multiple SSE events from a reader and sends them to a channel
-func ParseEvents(reader *bufio.Reader, eventChan chan<- Event) error {
-	defer close(eventChan)
-
-	for {
-		event, err := ParseEvent(reader)
-		if err != nil {
-			if err == io.EOF {
-				return nil
-			}
-			// Send error event
-			select {
-			case eventChan <- Event{
-				Type: "error",
-				Data: []byte(fmt.Sprintf("parse error: %v", err)),
-			}:
-			default:
-			}
-			return err
-		}
-
-		// Send the parsed event
-		select {
-		case eventChan <- event:
-		default:
-			// Channel is full, skip this event
-		}
-	}
-}
