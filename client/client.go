@@ -260,12 +260,13 @@ func (c *Client) handleDisconnection(done <-chan struct{}) {
 	retryCount := 0
 
 	for {
+		jitteredBackoff := addJitter(backoff)
 		select {
 		case <-done:
 			return
-		case <-time.After(addJitter(backoff)):
+		case <-time.After(jitteredBackoff):
 			retryCount++
-			slog.Info("attempting to reconnect", "url", c.url, "backoff", backoff, "jitteredBackoff", addJitter(backoff), "attempt", retryCount)
+			slog.Info("attempting to reconnect", "url", c.url, "backoff", backoff, "jitteredBackoff", jitteredBackoff, "attempt", retryCount)
 
 			if err := c.Connect(); err != nil {
 				slog.Warn("reconnection failed", "error", err, "backoff", backoff, "attempt", retryCount)
