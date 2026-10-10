@@ -195,7 +195,7 @@ func TestEvent_String_NoFields(t *testing.T) {
 }
 
 func TestConnection_ReadEvents_EventParsing(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", 100)
+	conn := NewConnection("http://localhost:8080/events", 100, nil)
 
 	// Create a mock reader that returns valid SSE data
 	eventData := "id: 123\nevent: test\ndata: hello world\rdata: line2\r\ndata: line3\n\n"
@@ -565,5 +565,34 @@ func TestClient_ReconnectingStateBetweenRetries(t *testing.T) {
 	}, time.Second, time.Millisecond, "Expected StateReconnecting between failed retries")
 
 	client.Disconnect()
+	assert.Equal(t, StateDisconnected, client.GetState(), "Expected StateDisconnected after disconnect")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestClient_DisconnectDuringConnect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	var client *Client
+
+	// Disconnect after the response is received, before Connect sets StateConnected
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		resp, err := http.DefaultTransport.RoundTrip(r)
+		client.Disconnect()
+		return resp, err
+	})}
+	client = NewClient(server.URL, nil, Options{Buffer: 10, HTTPClient: httpClient})
+
+	assert.ErrorIs(t, client.Connect(), ErrClientDisconnected, "Expected connect to report disconnect")
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected StateDisconnected after disconnect")
 }

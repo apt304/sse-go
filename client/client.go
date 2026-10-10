@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 var (
 	ErrClientAlreadyConnected = fmt.Errorf("client already connected")
+	ErrClientDisconnected     = fmt.Errorf("client disconnected during connect")
 )
 
 // EventHandler is a function that handles SSE events
@@ -37,6 +39,7 @@ type Options struct {
 	Backoff    time.Duration // Initial reconnection backoff. Default is 1 second.
 	MaxBackoff time.Duration // Maximum reconnection backoff. Default is 30 seconds.
 	MaxRetries int           // Maximum number of reconnection attempts. Default is 3.
+	HTTPClient *http.Client  // HTTP client for connections. Must not set Timeout, as it limits the lifetime of the SSE stream. Default is nil, which uses the NewConnection default.
 }
 
 // Client represents an SSE client
@@ -128,7 +131,7 @@ func (c *Client) Connect() error {
 	}
 
 	done := c.done
-	conn := NewConnection(c.url, c.options.Buffer, c.topics...)
+	conn := NewConnection(c.url, c.options.Buffer, c.options.HTTPClient, c.topics...)
 
 	// Read current last event ID in a lock
 	c.lastEventMu.RLock()
@@ -151,7 +154,16 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	c.setState(StateConnected)
+	// Disconnect may have been called during conn.Connect(). It has already closed conn.
+	c.connMu.Lock()
+	select {
+	case <-done:
+		c.connMu.Unlock()
+		return ErrClientDisconnected
+	default:
+		c.setState(StateConnected)
+	}
+	c.connMu.Unlock()
 
 	go c.handleEvents(conn, eventChan, done)
 
