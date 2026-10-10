@@ -257,6 +257,15 @@ func (c *Client) handleDisconnection(done <-chan struct{}) {
 					return
 				}
 
+				// Connect sets StateDisconnected on failure. Restore StateReconnecting unless Disconnect was called.
+				c.connMu.Lock()
+				select {
+				case <-done:
+				default:
+					c.setState(StateReconnecting)
+				}
+				c.connMu.Unlock()
+
 				// Increase backoff for next attempt
 				backoff *= 2
 				if backoff > c.options.MaxBackoff {
@@ -280,9 +289,8 @@ func (c *Client) Disconnect() {
 		c.conn.Close()
 		c.conn = nil
 	}
-	c.connMu.Unlock()
-
 	c.setState(StateDisconnected)
+	c.connMu.Unlock()
 }
 
 // GetState returns the current connection state

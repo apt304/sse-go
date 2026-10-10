@@ -532,3 +532,38 @@ func TestClient_ReconnectAfterServerClose(t *testing.T) {
 
 	client.Disconnect()
 }
+
+func TestClient_ReconnectingStateBetweenRetries(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Accept the first stream and close it, then fail all reconnection attempts
+		if requests.Add(1) > 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil, Options{
+		Reconnect:  true,
+		Backoff:    20 * time.Millisecond,
+		MaxBackoff: 20 * time.Millisecond,
+		MaxRetries: 10,
+	})
+
+	assert.NoError(t, client.Connect(), "Expected connect to succeed")
+
+	// Wait for two failed reconnection attempts
+	assert.Eventually(t, func() bool {
+		return requests.Load() >= 3
+	}, time.Second, time.Millisecond, "Expected reconnection attempts")
+
+	assert.Eventually(t, func() bool {
+		return client.GetState() == StateReconnecting
+	}, time.Second, time.Millisecond, "Expected StateReconnecting between failed retries")
+
+	client.Disconnect()
+	assert.Equal(t, StateDisconnected, client.GetState(), "Expected StateDisconnected after disconnect")
+}
