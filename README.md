@@ -235,7 +235,7 @@ client := NewClient("http://localhost:8080/events", []string{"notifications"}, O
 #### Reconnection
 The client supports automatic reconnection with exponential backoff. Configure this through the Options struct when creating the client.
 
-**MaxRetries**: Set to 0 for unlimited retries, or specify a positive number to limit reconnection attempts. When the limit is reached, the error handler will be called with a "max reconnection attempts exceeded" error.
+**MaxRetries**: Set to 0 to disable reconnection, or specify a positive number to limit reconnection attempts. When the limit is reached, the error handler will be called with a "failed to reconnect after N attempts" error.
 
 **Jitter**: The client automatically adds +/- 2% random jitter to backoff delays to prevent multiple clients from reconnecting simultaneously (thundering herd problem).
 

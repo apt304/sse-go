@@ -38,7 +38,7 @@ type Options struct {
 	Reconnect  bool          // Enable automatic reconnection. Default is true.
 	Backoff    time.Duration // Initial reconnection backoff. Default is 1 second.
 	MaxBackoff time.Duration // Maximum reconnection backoff. Default is 30 seconds.
-	MaxRetries int           // Maximum number of reconnection attempts. Default is 3.
+	MaxRetries int           // Maximum number of reconnection attempts. 0 disables reconnection. Default is 3.
 	HTTPClient *http.Client  // HTTP client for connections. Must not set Timeout, as it limits the lifetime of the SSE stream. Default is nil, which uses the NewConnection default.
 }
 
@@ -233,14 +233,27 @@ func (c *Client) handleEvent(event sse.Event) {
 
 // handleDisconnection handles connection loss and reconnection
 func (c *Client) handleDisconnection(done <-chan struct{}) {
+	// Disconnect may have been called while the connection was closing. It has already set StateDisconnected.
+	c.connMu.Lock()
+	select {
+	case <-done:
+		c.connMu.Unlock()
+		return
+	default:
+	}
+
 	c.setState(StateDisconnected)
 
-	if !c.options.Reconnect || c.options.MaxRetries <= 0 {
+	reconnect := c.options.Reconnect && c.options.MaxRetries > 0
+	if reconnect {
+		c.setState(StateReconnecting)
+	}
+	c.connMu.Unlock()
+
+	if !reconnect {
 		slog.Info("client disconnected without retry")
 		return
 	}
-
-	c.setState(StateReconnecting)
 
 	// Exponential backoff reconnection
 	backoff := c.options.Backoff
@@ -258,7 +271,7 @@ func (c *Client) handleDisconnection(done <-chan struct{}) {
 				slog.Warn("reconnection failed", "error", err, "backoff", backoff, "attempt", retryCount)
 
 				// Check if we've exceeded max retries
-				if c.options.MaxRetries > 0 && retryCount >= c.options.MaxRetries {
+				if retryCount >= c.options.MaxRetries {
 					slog.Warn("max reconnection attempts exceeded", "maxRetries", c.options.MaxRetries)
 					c.setState(StateDisconnected)
 

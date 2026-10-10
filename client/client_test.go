@@ -368,28 +368,6 @@ func TestClient_HandleDisconnection_BackoffCapped(t *testing.T) {
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
 }
 
-func TestClient_HandleDisconnection_UnlimitedRetries(t *testing.T) {
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
-		Reconnect:  true,
-		MaxRetries: 0,                    // Unlimited retries
-		Backoff:    1 * time.Millisecond, // Very fast for testing
-	})
-
-	// Set initial state
-	client.setState(StateConnected)
-
-	// This should trigger reconnection with unlimited retries
-	go client.handleDisconnection(client.done)
-
-	// Wait a bit for reconnection attempts
-	time.Sleep(20 * time.Millisecond)
-
-	// Should still be in reconnecting state (no max retries limit)
-	// Note: We can't easily test unlimited retries in unit tests due to timing
-	// So we just verify it doesn't immediately fail
-	assert.NotEqual(t, StateConnected, client.GetState(), "Expected state to change from connected")
-}
-
 func TestClient_HandleDisconnection_CancelledByDisconnect(t *testing.T) {
 	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
 		Reconnect:  true,
@@ -594,5 +572,21 @@ func TestClient_DisconnectDuringConnect(t *testing.T) {
 	client = NewClient(server.URL, nil, Options{Buffer: 10, HTTPClient: httpClient})
 
 	assert.ErrorIs(t, client.Connect(), ErrClientDisconnected, "Expected connect to report disconnect")
+	assert.Equal(t, StateDisconnected, client.GetState(), "Expected StateDisconnected after disconnect")
+}
+
+func TestClient_HandleDisconnection_AfterDisconnect(t *testing.T) {
+	client := NewClient("http://localhost:8080/events", nil, Options{
+		Reconnect:  true,
+		Backoff:    time.Hour,
+		MaxBackoff: time.Hour,
+		MaxRetries: 3,
+	})
+
+	// The connection closes after Disconnect, so handleDisconnection runs with a closed done channel
+	done := client.done
+	client.Disconnect()
+	client.handleDisconnection(done)
+
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected StateDisconnected after disconnect")
 }
