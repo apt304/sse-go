@@ -146,19 +146,20 @@ func (c *Client) Connect() error {
 
 	eventChan, err := conn.Connect()
 	if err != nil {
+		c.clearConn(conn)
 		c.setState(StateDisconnected)
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
 	c.setState(StateConnected)
 
-	go c.handleEvents(eventChan, done)
+	go c.handleEvents(conn, eventChan, done)
 
 	return nil
 }
 
 // handleEvents processes events from the connection
-func (c *Client) handleEvents(eventChan <-chan sse.Event, done <-chan struct{}) {
+func (c *Client) handleEvents(conn *Connection, eventChan <-chan sse.Event, done <-chan struct{}) {
 	for {
 		select {
 		case <-done:
@@ -166,12 +167,24 @@ func (c *Client) handleEvents(eventChan <-chan sse.Event, done <-chan struct{}) 
 		case event, ok := <-eventChan:
 			if !ok {
 				// Connection closed
+				c.clearConn(conn)
 				c.handleDisconnection(done)
 				return
 			}
 
 			c.handleEvent(event)
 		}
+	}
+}
+
+// clearConn closes conn and clears c.conn if conn is still the active connection
+func (c *Client) clearConn(conn *Connection) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	conn.Close()
+	if c.conn == conn {
+		c.conn = nil
 	}
 }
 

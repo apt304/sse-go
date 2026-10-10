@@ -2,7 +2,10 @@ package client
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -481,4 +484,51 @@ func TestClient_NoRetry(t *testing.T) {
 
 	// Should end up disconnected after max retries
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
+}
+
+func TestClient_Connect_RetryAfterFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil)
+
+	assert.Error(t, client.Connect(), "Expected first connect to fail")
+
+	err := client.Connect()
+	assert.Error(t, err, "Expected second connect to fail")
+	assert.NotErrorIs(t, err, ErrClientAlreadyConnected, "Expected failed connect to clear the connection")
+}
+
+func TestClient_ReconnectAfterServerClose(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+
+		// Close the first stream to trigger reconnection
+		if n == 1 {
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil, Options{
+		Reconnect:  true,
+		Backoff:    1 * time.Millisecond,
+		MaxBackoff: 1 * time.Millisecond,
+		MaxRetries: 3,
+	})
+
+	assert.NoError(t, client.Connect(), "Expected connect to succeed")
+
+	assert.Eventually(t, func() bool {
+		return requests.Load() == 2 && client.IsConnected()
+	}, time.Second, 5*time.Millisecond, "Expected client to reconnect after server closed the stream")
+
+	client.Disconnect()
 }
