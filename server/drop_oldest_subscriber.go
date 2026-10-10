@@ -88,6 +88,9 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 	// signal the subscriber and heartbeat workers to stop
 	close(stop)
 
+	// Wait for run() to stop writing to the response
+	<-done
+
 	// Remove the subscriber from the list
 	s.mu.Lock()
 	for i, subscriber := range s.subscribers {
@@ -184,6 +187,7 @@ type subscriptionChan struct {
 }
 
 func (s *DropOldestSubscriber) run(sub *subscriptionChan, lifecycleHooks LifecycleHooks, stop, done chan struct{}) {
+	defer close(done)
 	if lifecycleHooks.OnDisconnect != nil {
 		defer func() {
 			go lifecycleHooks.OnDisconnect(sub.Subscription)
@@ -203,13 +207,11 @@ func (s *DropOldestSubscriber) run(sub *subscriptionChan, lifecycleHooks Lifecyc
 			if _, err := sub.rcw.Write(evt); err != nil {
 				// On write error, stop work and remove the subscriber
 				slog.Warn("subscriber write error", "error", err)
-				close(done)
 				return
 			}
 			if err := sub.rcw.Flush(); err != nil {
 				// On flush error, stop work and remove the subscriber
 				slog.Warn("subscriber flush error", "error", err)
-				close(done)
 				return
 			}
 		}
