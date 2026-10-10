@@ -2,9 +2,8 @@ package client
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"sync"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -22,136 +21,95 @@ func TestClientIntegration(t *testing.T) {
 	// Create SSE server
 	sseServer := sse.NewServer(subscriber)
 
-	// Create HTTP server with SSE endpoint
-	// The server runs OnDisconnect in its own goroutine. Wait for both connections' hooks before the test returns.
+	// The server runs lifecycle hooks in their own goroutines. Wait on them instead of sleeping.
+	connected := make(chan struct{}, 2)
 	disconnected := make(chan struct{}, 2)
 
-	port := "8888"
-	httpServer := &http.Server{
-		Addr: ":" + port,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/events" {
-				// Handle SSE connection
-				topics := []string{"test"}
-				hooks := sse.LifecycleHooks{
-					OnConnect: func(sub sse.Subscription) {
-						t.Logf("SSE connection established for topics: %v", sub.Topics)
-					},
-					OnDisconnect: func(sub sse.Subscription) {
-						t.Logf("SSE connection closed for topics: %v", sub.Topics)
-						disconnected <- struct{}{}
-					},
-				}
-				sseServer.ServeHTTP(w, r, topics, hooks)
-			} else {
-				http.NotFound(w, r)
-			}
-		}),
-	}
-
-	// Start HTTP server in background
-	go func() {
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			assert.Fail(t, "HTTP server error", err)
+	// Create HTTP server with SSE endpoint
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hooks := sse.LifecycleHooks{
+			OnConnect: func(sub sse.Subscription) {
+				t.Logf("SSE connection established for topics: %v", sub.Topics)
+				connected <- struct{}{}
+			},
+			OnDisconnect: func(sub sse.Subscription) {
+				t.Logf("SSE connection closed for topics: %v", sub.Topics)
+				disconnected <- struct{}{}
+			},
 		}
-	}()
-
-	// Wait a bit for server to start
-	time.Sleep(100 * time.Millisecond)
+		sseServer.ServeHTTP(w, r, []string{"test"}, hooks)
+	}))
 
 	// Create client
-	client := NewClient(fmt.Sprintf("http://localhost:%s/events", port), []string{"test"})
+	client := NewClient(httpServer.URL+"/events", []string{"test"})
 
-	// Set up event handlers
-	var mu sync.Mutex
-	var receivedEvents []sse.Event
-	var receivedMessage bool
-
+	// Forward published events. Heartbeats have no ID.
+	received := make(chan sse.Event, 2)
 	client.OnMessage(func(event sse.Event) {
-		mu.Lock()
-		receivedMessage = true
-		receivedEvents = append(receivedEvents, event)
-		mu.Unlock()
 		t.Logf("Received message event: type=%s, data=%s, isHeartbeat=%v", event.Type, event.Data, event.IsHeartbeat())
+		if event.ID != "" {
+			received <- event
+		}
 	})
 
-	// Connect
+	wait := func(ch <-chan struct{}, msg string) {
+		t.Helper()
+		select {
+		case <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal(msg)
+		}
+	}
+
+	expectEvent := func(want sse.Event) {
+		t.Helper()
+		select {
+		case event := <-received:
+			assert.Equal(t, want, event, "Expected to receive the published event")
+		case <-time.After(5 * time.Second):
+			t.Fatalf("Expected to receive event %s", want.ID)
+		}
+	}
+
+	// Connect and wait for the server to register the subscriber
 	if err := client.Connect(); err != nil {
 		t.Fatalf("Failed to connect: %v", err)
 	}
+	wait(connected, "Expected server to accept the connection")
 
-	// Wait a bit for connection to establish
-	time.Sleep(100 * time.Millisecond)
-
-	// Publish some test events
 	testEvent := sse.Event{
 		ID:   "test-1",
 		Type: "message",
 		Data: []byte("Hello from SSE server!"),
 	}
-
 	assert.NoError(t, sseServer.Publish(testEvent, "test"), "Failed to publish event")
+	expectEvent(testEvent)
 
-	// Wait for events to be processed
-	time.Sleep(200 * time.Millisecond)
-
-	// Disconnect
 	client.Disconnect()
 
 	// Reconnect
 	if err := client.Connect(); err != nil {
 		t.Fatalf("Failed to reconnect: %v", err)
 	}
+	wait(connected, "Expected server to accept the reconnection")
 
-	// Wait a bit for reconnection to establish
-	time.Sleep(100 * time.Millisecond)
-
-	// Publish another test event
 	testEvent = sse.Event{
 		ID:   "test-2",
 		Type: "message",
 		Data: []byte("Hello from SSE server! (reconnected)"),
 	}
-
 	assert.NoError(t, sseServer.Publish(testEvent, "test"), "Failed to publish event")
+	expectEvent(testEvent)
 
-	// Wait for events to be processed
-	time.Sleep(200 * time.Millisecond)
-
-	// Disconnect
 	client.Disconnect()
 
 	// Shutdown servers
+	httpServer.Close()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-
-	assert.NoError(t, httpServer.Shutdown(ctx), "Failed to shutdown HTTP server")
 	assert.NoError(t, subscriber.Shutdown(ctx), "Failed to shutdown SSE subscriber")
 
-	for range 2 {
-		select {
-		case <-disconnected:
-		case <-time.After(time.Second):
-			t.Fatal("Expected OnDisconnect for each connection")
-		}
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-
-	// Verify we received events
-	assert.True(t, receivedMessage, "Expected to receive message event")
-	assert.GreaterOrEqual(t, len(receivedEvents), 1, "Expected at least 1 event")
-
-	// Verify the specific event we published
-	foundTestEvent := false
-	for _, event := range receivedEvents {
-		if event.ID == "test-1" && event.Type == "message" && string(event.Data) == "Hello from SSE server!" {
-			foundTestEvent = true
-			break
-		}
-	}
-
-	assert.True(t, foundTestEvent, "Expected to receive the test event we published",
-		"Received events: %+v", receivedEvents)
+	wait(disconnected, "Expected OnDisconnect for the first connection")
+	wait(disconnected, "Expected OnDisconnect for the second connection")
 }
