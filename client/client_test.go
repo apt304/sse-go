@@ -298,11 +298,9 @@ func TestClient_HandleDisconnection_MaxRetriesExceeded(t *testing.T) {
 		Backoff:    1 * time.Millisecond, // Very fast for testing
 	})
 
-	var errorReceived bool
-	var errorMessage string
+	errc := make(chan error, 1)
 	client.OnError(func(err error) {
-		errorReceived = true
-		errorMessage = err.Error()
+		errc <- err
 	})
 
 	// Set initial state
@@ -312,10 +310,13 @@ func TestClient_HandleDisconnection_MaxRetriesExceeded(t *testing.T) {
 	go client.handleDisconnection(client.done)
 
 	// Wait for the error handler to be called
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case err := <-errc:
+		assert.Contains(t, err.Error(), "failed to reconnect after 2 attempts", "Expected max retries error message")
+	case <-time.After(time.Second):
+		t.Fatal("Expected error handler to be called after max retries")
+	}
 
-	assert.True(t, errorReceived, "Expected error handler to be called after max retries")
-	assert.Contains(t, errorMessage, "failed to reconnect after 2 attempts", "Expected max retries error message")
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected state to be disconnected after max retries")
 }
 
@@ -331,9 +332,9 @@ func TestClient_HandleDisconnection_BackoffIncrease(t *testing.T) {
 	client.setState(StateConnected)
 
 	// Track reconnection attempts
-	var attempts int
+	var attempts atomic.Int32
 	client.OnError(func(err error) {
-		attempts++
+		attempts.Add(1)
 	})
 
 	// This should trigger reconnection with backoff increase
@@ -343,7 +344,7 @@ func TestClient_HandleDisconnection_BackoffIncrease(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Should have attempted reconnections
-	assert.Greater(t, attempts, 0, "Expected reconnection attempts to occur")
+	assert.Greater(t, attempts.Load(), int32(0), "Expected reconnection attempts to occur")
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
 }
 
