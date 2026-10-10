@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -108,16 +108,16 @@ func (w *fuzzHTTPWriter) Flush() {
 
 func FuzzDropOldestSubscriber_Matrix(f *testing.F) {
 	// Seed corpus: small/large, fast/slow, varying topics & buffers.
-	f.Add(10, 1, 3, 100, 16, 0, 0, 0)     // small, fast, no heartbeat
-	f.Add(64, 2, 8, 400, 64, 0, 0, 250)   // mid, heartbeat
-	f.Add(200, 3, 12, 800, 32, 2, 0, 0)   // many subs, slow writers
-	f.Add(50, 5, 10, 1000, 8, 1, 50, 100) // small buffers, backpressure/drop
-	f.Add(0, 0, 5, 0, 32, 0, 0, 0)        // no subs, no messages
-	f.Add(128, 0, 16, 300, 64, 0, 100, 0) // subs with zero topics
+	f.Add(10, 1, 3, 100, 16, 0, 0, 0)      // small, fast, no heartbeat
+	f.Add(64, 2, 8, 400, 64, 0, 0, 250)    // mid, heartbeat
+	f.Add(200, 3, 12, 800, 32, 1000, 0, 0) // many subs, slow writers
+	f.Add(50, 5, 10, 1000, 8, 500, 1, 100) // small buffers, backpressure/drop
+	f.Add(0, 0, 5, 0, 32, 0, 0, 0)         // no subs, no messages
+	f.Add(128, 0, 16, 300, 64, 0, 1, 0)    // subs with zero topics
 
 	f.Fuzz(func(t *testing.T,
 		subscribers int, topicsPerSub int, topicCount int, msgCount int,
-		bufSize int, writerDelayMs int, publishDelayMs int, heartbeatMs int,
+		bufSize int, writerDelayUs int, publishYield int, heartbeatMs int,
 	) {
 		// Clamp to keep fuzz executions bounded and stable.
 
@@ -126,8 +126,8 @@ func FuzzDropOldestSubscriber_Matrix(f *testing.F) {
 		topicCount = clamp(topicCount, 1, 500)
 		msgCount = clamp(msgCount, 0, 100000)
 		bufSize = clamp(bufSize, 0, 1024)
-		writerDelayMs = clamp(writerDelayMs, 0, 100)
-		publishDelayMs = clamp(publishDelayMs, 0, 50)
+		writerDelayUs = clamp(writerDelayUs, 0, 1000)
+		publishYield = clamp(publishYield, 0, 1)
 		heartbeatMs = clamp(heartbeatMs, 0, 500)
 
 		// Build topics: t0..tN-1
@@ -148,7 +148,7 @@ func FuzzDropOldestSubscriber_Matrix(f *testing.F) {
 		var exitedWG sync.WaitGroup
 		for i := 0; i < subscribers; i++ {
 			subTopics := assignTopics(i, topicsPerSub, topicCount, topics)
-			w := newFuzzWriter(time.Duration(writerDelayMs)*time.Millisecond, subTopics)
+			w := newFuzzWriter(time.Duration(writerDelayUs)*time.Microsecond, subTopics)
 			connectedWG.Add(1)
 			exitedWG.Add(1)
 			go func(subTopics []string) {
@@ -170,7 +170,6 @@ func FuzzDropOldestSubscriber_Matrix(f *testing.F) {
 		connectedWG.Wait()
 
 		// Publish messages to topics in a round-robin fashion.
-		pubDelay := time.Duration(publishDelayMs) * time.Millisecond
 		for i := 0; i < msgCount; i++ {
 			topic := topics[i%topicCount]
 			evt := Event{Type: topic, Data: []byte("x")}
@@ -181,9 +180,9 @@ func FuzzDropOldestSubscriber_Matrix(f *testing.F) {
 				}
 				break
 			}
-			if pubDelay > 0 {
-				// cap delay so a mutated extreme doesn't explode runtime
-				time.Sleep(time.Duration(math.Min(float64(pubDelay), float64(2*time.Millisecond))))
+			if publishYield > 0 {
+				// Let subscriber workers run between publishes
+				runtime.Gosched()
 			}
 		}
 
@@ -205,16 +204,16 @@ func FuzzDropOldestSubscriber_Matrix(f *testing.F) {
 }
 
 func FuzzServer_DropOldestSubscriber_Matrix(f *testing.F) {
-	f.Add(10, 1, 3, 100, 16, 0, 0, 0)     // small, fast, no heartbeat
-	f.Add(64, 2, 8, 400, 64, 0, 0, 250)   // mid, heartbeat
-	f.Add(200, 3, 12, 800, 32, 2, 0, 0)   // many subs, slow writers
-	f.Add(50, 5, 10, 1000, 8, 1, 50, 100) // small buffers, backpressure/drop
-	f.Add(0, 0, 5, 0, 32, 0, 0, 0)        // no subs, no messages
-	f.Add(128, 0, 16, 300, 64, 0, 100, 0) // subs with zero topics
+	f.Add(10, 1, 3, 100, 16, 0, 0, 0)      // small, fast, no heartbeat
+	f.Add(64, 2, 8, 400, 64, 0, 0, 250)    // mid, heartbeat
+	f.Add(200, 3, 12, 800, 32, 1000, 0, 0) // many subs, slow writers
+	f.Add(50, 5, 10, 1000, 8, 500, 1, 100) // small buffers, backpressure/drop
+	f.Add(0, 0, 5, 0, 32, 0, 0, 0)         // no subs, no messages
+	f.Add(128, 0, 16, 300, 64, 0, 1, 0)    // subs with zero topics
 
 	f.Fuzz(func(t *testing.T,
 		subscribers int, topicsPerSub int, topicCount int, msgCount int,
-		bufSize int, writerDelayMs int, publishDelayMs int, heartbeatMs int,
+		bufSize int, writerDelayUs int, publishYield int, heartbeatMs int,
 	) {
 		// Clamp to keep fuzz executions bounded and stable.
 		subscribers = clamp(subscribers, 0, 500)
@@ -222,8 +221,8 @@ func FuzzServer_DropOldestSubscriber_Matrix(f *testing.F) {
 		topicCount = clamp(topicCount, 1, 500)
 		msgCount = clamp(msgCount, 0, 10000)
 		bufSize = clamp(bufSize, 0, 1024)
-		writerDelayMs = clamp(writerDelayMs, 0, 100)
-		publishDelayMs = clamp(publishDelayMs, 0, 50)
+		writerDelayUs = clamp(writerDelayUs, 0, 1000)
+		publishYield = clamp(publishYield, 0, 1)
 		heartbeatMs = clamp(heartbeatMs, 0, 500)
 
 		// Build topics: t0..tN-1
@@ -260,7 +259,7 @@ func FuzzServer_DropOldestSubscriber_Matrix(f *testing.F) {
 				}
 
 				// Create response writer with optional delay
-				w := newFuzzHTTPWriter(time.Duration(writerDelayMs)*time.Millisecond, subTopics)
+				w := newFuzzHTTPWriter(time.Duration(writerDelayUs)*time.Microsecond, subTopics)
 
 				hooks := LifecycleHooks{
 					OnConnect: func(sub Subscription) {
@@ -298,7 +297,6 @@ func FuzzServer_DropOldestSubscriber_Matrix(f *testing.F) {
 		connectedWG.Wait()
 
 		// Publish messages to topics in a round-robin fashion.
-		pubDelay := time.Duration(publishDelayMs) * time.Millisecond
 		for i := 0; i < msgCount; i++ {
 			topic := topics[i%topicCount]
 			evt := Event{Type: topic, Data: []byte("x")}
@@ -309,9 +307,9 @@ func FuzzServer_DropOldestSubscriber_Matrix(f *testing.F) {
 				}
 				break
 			}
-			if pubDelay > 0 {
-				// cap delay so a mutated extreme doesn't explode runtime
-				time.Sleep(time.Duration(math.Min(float64(pubDelay), float64(2*time.Millisecond))))
+			if publishYield > 0 {
+				// Let subscriber workers run between publishes
+				runtime.Gosched()
 			}
 		}
 
