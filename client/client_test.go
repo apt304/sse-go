@@ -28,6 +28,7 @@ func TestClient_Options(t *testing.T) {
 	// Test default options
 	client := NewClient("http://localhost:8080/events", nil)
 
+	assert.Equal(t, DefaultOptions(), client.options, "Expected DefaultOptions when no options are provided")
 	assert.True(t, client.options.Reconnect, "Expected reconnect to be true by default")
 	assert.Equal(t, 1*time.Second, client.options.Backoff, "Expected backoff to be 1s")
 	assert.Equal(t, 30*time.Second, client.options.MaxBackoff, "Expected maxBackoff to be 30s")
