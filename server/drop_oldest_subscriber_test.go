@@ -34,6 +34,13 @@ func (t *testWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// Data returns a copy of the written data.
+func (t *testWriter) Data() [][]byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([][]byte(nil), t.data...)
+}
+
 func (t *testWriter) FlushError() error {
 	return nil
 }
@@ -477,6 +484,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}
 
 		subOpened := make(chan struct{})
+		subDone := make(chan struct{})
 
 		go func() {
 			subErr := subscriber.Subscribe(context.Background(), Subscription{
@@ -488,6 +496,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 				},
 			})
 			assert.NoError(t, subErr)
+			close(subDone)
 		}()
 
 		<-subOpened
@@ -497,9 +506,12 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}, "test")
 		assert.NoError(t, err)
 
-		time.Sleep(100 * time.Millisecond)
-		_, open := <-subOpened
-		assert.False(t, open)
+		// Subscribe returns after removing the subscriber
+		select {
+		case <-subDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected Subscribe to return after the error")
+		}
 
 		assert.Equal(t, 0, len(subscriber.subscribers))
 	})
@@ -513,6 +525,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}
 
 		subOpened := make(chan struct{})
+		subDone := make(chan struct{})
 
 		go func() {
 			subErr := subscriber.Subscribe(context.Background(), Subscription{
@@ -524,6 +537,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 				},
 			})
 			assert.NoError(t, subErr)
+			close(subDone)
 		}()
 
 		<-subOpened
@@ -533,9 +547,12 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}, "test")
 		assert.NoError(t, err)
 
-		time.Sleep(100 * time.Millisecond)
-		_, open := <-subOpened
-		assert.False(t, open)
+		// Subscribe returns after removing the subscriber
+		select {
+		case <-subDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected Subscribe to return after the error")
+		}
 
 		assert.Equal(t, 0, len(subscriber.subscribers))
 	})
@@ -566,15 +583,16 @@ func TestDropOldestSubscriber_Heartbeat(t *testing.T) {
 
 		<-subOpened
 
-		time.Sleep(100 * time.Millisecond)
-
-		assert.GreaterOrEqual(t, len(writer.data), 8)
-		for i := range writer.data {
-			assert.Equal(t, []byte(": hb\n\n"), writer.data[i])
-		}
+		assert.Eventually(t, func() bool {
+			return len(writer.Data()) >= 8
+		}, 5*time.Second, time.Millisecond, "Expected heartbeats to be sent")
 
 		err := subscriber.Shutdown(context.Background())
 		assert.NoError(t, err)
+
+		for _, data := range writer.Data() {
+			assert.Equal(t, []byte(": hb\n\n"), data)
+		}
 	})
 
 	t.Run("heartbeat does not block if buffer is full", func(t *testing.T) {
@@ -606,13 +624,15 @@ func TestDropOldestSubscriber_Heartbeat(t *testing.T) {
 
 		writer.mu.Unlock()
 
-		time.Sleep(1 * time.Millisecond) // Allow the heartbeat to be sent
-
-		assert.LessOrEqual(t, len(writer.data), 2)
-		assert.Equal(t, []byte(": hb\n\n"), writer.data[0])
-
+		// Shutdown waits for the blocked write to finish
 		err := subscriber.Shutdown(context.Background())
 		assert.NoError(t, err)
+
+		data := writer.Data()
+		assert.LessOrEqual(t, len(data), 2)
+		if assert.NotEmpty(t, data) {
+			assert.Equal(t, []byte(": hb\n\n"), data[0])
+		}
 	})
 
 	// t.Run("heartbeat is sent with heartbeat interval", func(t *testing.T) {

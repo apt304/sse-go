@@ -420,32 +420,39 @@ func TestLastEventID(t *testing.T) {
 	subscriber := NewDropOldestSubscriber(Options{})
 	server := NewServer(subscriber)
 
-	// Create request with Last-Event-ID header
-	req := httptest.NewRequest("GET", "/events", nil)
+	// Create request with Last-Event-ID header and a context to end the connection
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("GET", "/events", nil).WithContext(ctx)
 	req.Header.Set("Last-Event-ID", "test-123")
 	w := httptest.NewRecorder()
 
-	done := make(chan bool)
+	connected := make(chan string, 1)
+	served := make(chan struct{})
 	go func() {
 		hooks := LifecycleHooks{
 			OnConnect: func(sub Subscription) {
-				assert.Equal(t, "test-123", sub.LastEventID)
-				done <- true
+				connected <- sub.LastEventID
 			},
 		}
 		server.ServeHTTP(w, req, []string{"test-topic"}, hooks)
+		close(served)
 	}()
 
-	// Cancel request by creating a cancellable context
-	ctx, cancel := context.WithCancel(context.Background())
-	req = req.WithContext(ctx)
+	select {
+	case lastEventID := <-connected:
+		assert.Equal(t, "test-123", lastEventID)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for connection")
+	}
+
+	// End the connection and wait for ServeHTTP to return
 	cancel()
 
 	select {
-	case <-done:
-		// Success
-	case <-time.After(1 * time.Second):
-		t.Fatal("Timeout waiting for connection")
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Timeout waiting for ServeHTTP to return")
 	}
 }
 
