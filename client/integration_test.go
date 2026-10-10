@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,9 @@ func TestClientIntegration(t *testing.T) {
 	sseServer := sse.NewServer(subscriber)
 
 	// Create HTTP server with SSE endpoint
+	// The server runs OnDisconnect in its own goroutine. Wait for both connections' hooks before the test returns.
+	disconnected := make(chan struct{}, 2)
+
 	port := "8888"
 	httpServer := &http.Server{
 		Addr: ":" + port,
@@ -35,6 +39,7 @@ func TestClientIntegration(t *testing.T) {
 					},
 					OnDisconnect: func(sub sse.Subscription) {
 						t.Logf("SSE connection closed for topics: %v", sub.Topics)
+						disconnected <- struct{}{}
 					},
 				}
 				sseServer.ServeHTTP(w, r, topics, hooks)
@@ -58,12 +63,15 @@ func TestClientIntegration(t *testing.T) {
 	client := NewClient(fmt.Sprintf("http://localhost:%s/events", port), []string{"test"})
 
 	// Set up event handlers
+	var mu sync.Mutex
 	var receivedEvents []sse.Event
 	var receivedMessage bool
 
 	client.OnMessage(func(event sse.Event) {
+		mu.Lock()
 		receivedMessage = true
 		receivedEvents = append(receivedEvents, event)
+		mu.Unlock()
 		t.Logf("Received message event: type=%s, data=%s, isHeartbeat=%v", event.Type, event.Data, event.IsHeartbeat())
 	})
 
@@ -119,6 +127,17 @@ func TestClientIntegration(t *testing.T) {
 
 	assert.NoError(t, httpServer.Shutdown(ctx), "Failed to shutdown HTTP server")
 	assert.NoError(t, subscriber.Shutdown(ctx), "Failed to shutdown SSE subscriber")
+
+	for range 2 {
+		select {
+		case <-disconnected:
+		case <-time.After(time.Second):
+			t.Fatal("Expected OnDisconnect for each connection")
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Verify we received events
 	assert.True(t, receivedMessage, "Expected to receive message event")

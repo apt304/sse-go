@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -321,31 +322,48 @@ func TestClient_HandleDisconnection_MaxRetriesExceeded(t *testing.T) {
 }
 
 func TestClient_HandleDisconnection_BackoffIncrease(t *testing.T) {
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
+	var mu sync.Mutex
+	var times []time.Time
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		times = append(times, time.Now())
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil, Options{
 		Reconnect:  true,
-		MaxRetries: 3,
-		Backoff:    1 * time.Millisecond,  // Start with 1ms
-		MaxBackoff: 10 * time.Millisecond, // Cap at 10ms
+		MaxRetries: 4,
+		Backoff:    10 * time.Millisecond, // Start with 10ms
+		MaxBackoff: 40 * time.Millisecond, // Cap at 40ms
 	})
 
-	// Set initial state
-	client.setState(StateConnected)
-
-	// Track reconnection attempts
-	var attempts atomic.Int32
+	errc := make(chan error, 1)
 	client.OnError(func(err error) {
-		attempts.Add(1)
+		errc <- err
 	})
 
-	// This should trigger reconnection with backoff increase
 	go client.handleDisconnection(client.done)
 
-	// Wait for some reconnection attempts
-	time.Sleep(50 * time.Millisecond)
-
-	// Should have attempted reconnections
-	assert.Greater(t, attempts.Load(), int32(0), "Expected reconnection attempts to occur")
+	// Wait for max retries to be exceeded
+	select {
+	case <-errc:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected error handler to be called after max retries")
+	}
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, times, 4, "Expected one request per retry")
+
+	// Backoffs are 10ms, 20ms, 40ms, 40ms. The first precedes the first request.
+	// Jitter is +/- 2% and timers do not fire early, so only lower bounds are checked.
+	for i, want := range []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond} {
+		gap := times[i+1].Sub(times[i])
+		assert.GreaterOrEqual(t, gap, want*98/100, "Expected gap %d to be at least the backoff", i+1)
+	}
 }
 
 func TestClient_HandleDisconnection_BackoffCapped(t *testing.T) {
