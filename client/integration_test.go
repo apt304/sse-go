@@ -90,6 +90,29 @@ func TestClientIntegration(t *testing.T) {
 	// Disconnect
 	client.Disconnect()
 
+	// Reconnect
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Failed to reconnect: %v", err)
+	}
+
+	// Wait a bit for reconnection to establish
+	time.Sleep(100 * time.Millisecond)
+
+	// Publish another test event
+	testEvent = sse.Event{
+		ID:   "test-2",
+		Type: "message",
+		Data: []byte("Hello from SSE server! (reconnected)"),
+	}
+
+	assert.NoError(t, sseServer.Publish(testEvent, "test"), "Failed to publish event")
+
+	// Wait for events to be processed
+	time.Sleep(200 * time.Millisecond)
+
+	// Disconnect
+	client.Disconnect()
+
 	// Shutdown servers
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

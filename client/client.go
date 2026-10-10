@@ -127,12 +127,17 @@ func (c *Client) Connect() error {
 		return ErrClientAlreadyConnected
 	}
 
+	done := c.done
 	conn := NewConnection(c.url, c.options.Buffer, c.topics...)
+
+	// Read current last event ID in a lock
 	c.lastEventMu.RLock()
-	if c.lastEventID != "" {
-		conn.SetLastEventID(c.lastEventID)
-	}
+	lastEventID := c.lastEventID
 	c.lastEventMu.RUnlock()
+
+	if lastEventID != "" {
+		conn.SetLastEventID(lastEventID)
+	}
 
 	c.conn = conn
 	c.setState(StateConnecting)
@@ -147,21 +152,21 @@ func (c *Client) Connect() error {
 
 	c.setState(StateConnected)
 
-	go c.handleEvents(eventChan)
+	go c.handleEvents(eventChan, done)
 
 	return nil
 }
 
 // handleEvents processes events from the connection
-func (c *Client) handleEvents(eventChan <-chan sse.Event) {
+func (c *Client) handleEvents(eventChan <-chan sse.Event, done <-chan struct{}) {
 	for {
 		select {
-		case <-c.done:
+		case <-done:
 			return
 		case event, ok := <-eventChan:
 			if !ok {
 				// Connection closed
-				c.handleDisconnection()
+				c.handleDisconnection(done)
 				return
 			}
 
@@ -202,7 +207,7 @@ func (c *Client) handleEvent(event sse.Event) {
 }
 
 // handleDisconnection handles connection loss and reconnection
-func (c *Client) handleDisconnection() {
+func (c *Client) handleDisconnection(done <-chan struct{}) {
 	c.setState(StateDisconnected)
 
 	if !c.options.Reconnect || c.options.MaxRetries <= 0 {
@@ -218,7 +223,7 @@ func (c *Client) handleDisconnection() {
 
 	for {
 		select {
-		case <-c.done:
+		case <-done:
 			return
 		case <-time.After(addJitter(backoff)):
 			retryCount++
@@ -255,9 +260,9 @@ func (c *Client) handleDisconnection() {
 
 // Disconnect closes the connection
 func (c *Client) Disconnect() {
-	close(c.done)
-
 	c.connMu.Lock()
+	close(c.done)
+	c.done = make(chan struct{})
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
