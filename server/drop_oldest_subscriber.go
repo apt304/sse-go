@@ -165,7 +165,8 @@ func (s *DropOldestSubscriber) Publish(event Event, topics ...string) error {
 	return nil
 }
 
-// Shutdown shuts down the subscriber. It is safe to call multiple times.
+// Shutdown shuts down the subscriber. It is safe to call multiple times. It waits for subscribers to finish
+// until ctx is done, then sets an immediate write deadline on remaining connections and returns ctx.Err().
 func (s *DropOldestSubscriber) Shutdown(ctx context.Context) error {
 	select {
 	case <-s.close:
@@ -176,9 +177,27 @@ func (s *DropOldestSubscriber) Shutdown(ctx context.Context) error {
 	close(s.close)
 
 	// Wait for all subscribers to finish
-	s.wg.Wait()
+	finished := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(finished)
+	}()
 
-	return nil
+	select {
+	case <-finished:
+		return nil
+	case <-ctx.Done():
+	}
+
+	// Fail writes blocked on clients that are not reading. Subscribers are removed under s.mu before
+	// Subscribe returns, so each response is still active. Writers without deadline support are skipped.
+	s.mu.RLock()
+	for _, sub := range s.subscribers {
+		_ = sub.rcw.rc.SetWriteDeadline(time.Now())
+	}
+	s.mu.RUnlock()
+
+	return ctx.Err()
 }
 
 type subscriptionChan struct {

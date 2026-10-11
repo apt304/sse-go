@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -108,6 +109,96 @@ func (e errorWriter) Header() http.Header {
 }
 
 func (e errorWriter) WriteHeader(_ int) {}
+
+// gateWriter blocks every Write until release is closed or a write deadline is set. started receives a value
+// when a Write begins.
+type gateWriter struct {
+	started      chan struct{}
+	release      chan struct{}
+	deadline     chan struct{}
+	deadlineOnce sync.Once
+}
+
+func newGateWriter() *gateWriter {
+	return &gateWriter{
+		started:  make(chan struct{}, 100),
+		release:  make(chan struct{}),
+		deadline: make(chan struct{}),
+	}
+}
+
+func (w *gateWriter) Write(p []byte) (int, error) {
+	select {
+	case w.started <- struct{}{}:
+	default:
+	}
+
+	select {
+	case <-w.release:
+		return len(p), nil
+	case <-w.deadline:
+		return 0, os.ErrDeadlineExceeded
+	}
+}
+
+// SetWriteDeadline fails blocked and future writes, as a connection does once its deadline passes.
+func (w *gateWriter) SetWriteDeadline(_ time.Time) error {
+	w.deadlineOnce.Do(func() {
+		close(w.deadline)
+	})
+	return nil
+}
+
+func (w *gateWriter) FlushError() error {
+	return nil
+}
+
+func (w *gateWriter) Header() http.Header {
+	return http.Header{}
+}
+
+func (w *gateWriter) WriteHeader(_ int) {}
+
+// subscribeAsync runs Subscribe in a goroutine and waits for OnConnect. The returned channel is closed when
+// Subscribe returns. hooks.OnConnect, if set, runs before the connection is reported.
+func subscribeAsync(t *testing.T, ctx context.Context, subscriber Subscriber, w http.ResponseWriter, hooks LifecycleHooks) <-chan struct{} {
+	t.Helper()
+
+	connected := make(chan struct{})
+	onConnect := hooks.OnConnect
+	hooks.OnConnect = func(sub Subscription) {
+		close(connected)
+		if onConnect != nil {
+			onConnect(sub)
+		}
+	}
+
+	subDone := make(chan struct{})
+	go func() {
+		assert.NoError(t, subscriber.Subscribe(ctx, Subscription{
+			Topics: []string{"test"},
+			rcw:    rcWriter{w: w, rc: http.NewResponseController(w)},
+		}, hooks))
+		close(subDone)
+	}()
+
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected subscriber to connect")
+	}
+	return subDone
+}
+
+// waitClosed fails the test if ch is not closed within 5 seconds.
+func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal(msg)
+	}
+}
 
 func TestDropOldestSubscriber_New(t *testing.T) {
 	t.Run("subscriber with default options", func(t *testing.T) {
@@ -666,5 +757,38 @@ func TestDropOldestSubscriber_Shutdown(t *testing.T) {
 
 		err = subscriber.Shutdown(context.Background())
 		assert.NoError(t, err)
+	})
+
+	t.Run("shutdown returns when the context expires with a blocked writer", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{Buffer: 1})
+		writer := newGateWriter()
+		defer close(writer.release)
+		subDone := subscribeAsync(t, context.Background(), subscriber, writer, LifecycleHooks{})
+
+		// Block the worker in Write
+		assert.NoError(t, subscriber.Publish(Event{Data: []byte("test")}, "test"))
+		select {
+		case <-writer.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected the worker to start writing")
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+
+		shutdownErr := make(chan error, 1)
+		go func() {
+			shutdownErr <- subscriber.Shutdown(ctx)
+		}()
+
+		select {
+		case err := <-shutdownErr:
+			assert.ErrorIs(t, err, context.DeadlineExceeded, "Expected Shutdown to return the context error")
+		case <-time.After(5 * time.Second):
+			t.Error("Expected Shutdown to return when its context expires")
+		}
+
+		// The write deadline fails the blocked write without the writer being released
+		waitClosed(t, subDone, "Expected Subscribe to return after the write deadline")
 	})
 }
