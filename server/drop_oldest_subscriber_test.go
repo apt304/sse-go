@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -198,6 +200,27 @@ func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
 	case <-time.After(5 * time.Second):
 		t.Fatal(msg)
 	}
+}
+
+// waitBlockedOnLock waits until count goroutines running fn are blocked acquiring a sync.RWMutex write lock.
+func waitBlockedOnLock(t *testing.T, fn string, count int) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(buf, true)
+		blocked := 0
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(g, "sync.(*RWMutex).Lock") && strings.Contains(g, fn) {
+				blocked++
+			}
+		}
+		if blocked >= count {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("Expected %d goroutines in %s to block acquiring a lock", count, fn)
 }
 
 func TestDropOldestSubscriber_New(t *testing.T) {
@@ -406,6 +429,31 @@ func TestDropOldestSubscriber_Subscribe(t *testing.T) {
 
 		// Verify subscribers are removed
 		assert.Equal(t, 0, len(subscriber.subscribers))
+	})
+
+	t.Run("subscribe checks closed after acquiring the lock", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{})
+		writer := NewTestWriter()
+
+		// Hold s.mu so Subscribe blocks, then close as Shutdown does
+		subscriber.mu.Lock()
+		subErr := make(chan error, 1)
+		go func() {
+			subErr <- subscriber.Subscribe(context.Background(), Subscription{
+				Topics: []string{"test"},
+				rcw:    rcWriter{w: writer, rc: http.NewResponseController(writer)},
+			}, LifecycleHooks{})
+		}()
+		waitBlockedOnLock(t, "(*DropOldestSubscriber).Subscribe", 1)
+		close(subscriber.close)
+		subscriber.mu.Unlock()
+
+		select {
+		case err := <-subErr:
+			assert.ErrorIs(t, err, ErrSubscriberClosed, "Expected Subscribe to see the subscriber closed")
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected Subscribe to return")
+		}
 	})
 }
 
@@ -757,6 +805,30 @@ func TestDropOldestSubscriber_Shutdown(t *testing.T) {
 
 		err = subscriber.Shutdown(context.Background())
 		assert.NoError(t, err)
+	})
+
+	t.Run("concurrent shutdowns check closed after acquiring the lock", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{})
+
+		// Hold s.mu so both calls block before checking whether the subscriber is closed
+		subscriber.mu.Lock()
+		shutdownErr := make(chan error, 2)
+		for range 2 {
+			go func() {
+				shutdownErr <- subscriber.Shutdown(context.Background())
+			}()
+		}
+		waitBlockedOnLock(t, "(*DropOldestSubscriber).Shutdown", 2)
+		subscriber.mu.Unlock()
+
+		for range 2 {
+			select {
+			case err := <-shutdownErr:
+				assert.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Expected Shutdown to return")
+			}
+		}
 	})
 
 	t.Run("shutdown returns when the context expires with a blocked writer", func(t *testing.T) {
