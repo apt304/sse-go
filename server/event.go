@@ -62,6 +62,11 @@ func (e Event) Write(w io.Writer) error {
 		return err
 	}
 
+	// A line break would end the field and start another. ID and type lines cannot be joined like data lines.
+	if strings.ContainsAny(e.ID, "\r\n") || strings.ContainsAny(e.Type, "\r\n") {
+		return ErrInvalidEventField
+	}
+
 	if e.ID != "" {
 		_, err := builder.WriteString("id: ")
 		if err != nil {

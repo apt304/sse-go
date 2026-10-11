@@ -11,6 +11,7 @@ var (
 	ErrSubscriberClosed    = fmt.Errorf("subscriber closed")
 	ErrNoTopics            = fmt.Errorf("at least one topic must be specified")
 	ErrFlusherNotSupported = fmt.Errorf("response writer does not implement http.Flusher")
+	ErrInvalidEventField   = fmt.Errorf("event ID and type must not contain line breaks")
 )
 
 type Server struct {

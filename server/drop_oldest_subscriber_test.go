@@ -614,6 +614,17 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		assert.Equal(t, []byte("data: test 2\n\n"), writer.data[1])
 	})
 
+	t.Run("publish with line break in ID returns an error", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{Buffer: 1})
+		subDone := subscribeAsync(t, context.Background(), subscriber, NewTestWriter(), LifecycleHooks{})
+
+		err := subscriber.Publish(Event{ID: "1\nevent: injected", Data: []byte("test")}, "test")
+		assert.ErrorIs(t, err, ErrInvalidEventField)
+
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
+		waitClosed(t, subDone, "Expected Subscribe to return")
+	})
+
 	t.Run("publish with writer error", func(t *testing.T) {
 		subscriber := NewDropOldestSubscriber(Options{})
 		assert.NotNil(t, subscriber)

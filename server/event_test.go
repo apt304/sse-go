@@ -240,6 +240,27 @@ func TestParseEvent_Heartbeat(t *testing.T) {
 	assert.True(t, event.IsHeartbeat(), "Expected a parsed heartbeat to be recognized as a heartbeat")
 }
 
+func TestEvent_Write_LineBreakInField(t *testing.T) {
+	tests := []struct {
+		name  string
+		event Event
+	}{
+		{name: "newline in ID", event: Event{ID: "1\nevent: injected", Data: []byte("x")}},
+		{name: "carriage return in ID", event: Event{ID: "1\revent: injected", Data: []byte("x")}},
+		{name: "newline in type", event: Event{Type: "message\ndata: injected", Data: []byte("x")}},
+		{name: "carriage return in type", event: Event{Type: "message\rdata: injected", Data: []byte("x")}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := tt.event.Write(&buf)
+			assert.ErrorIs(t, err, ErrInvalidEventField)
+			assert.Empty(t, buf.String(), "Expected nothing to be written")
+		})
+	}
+}
+
 func TestParseEvent_EOF(t *testing.T) {
 	// Test EOF handling with empty input
 	reader := bufio.NewReader(strings.NewReader(""))
