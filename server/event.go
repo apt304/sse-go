@@ -281,7 +281,7 @@ func processLine(line string, event *Event, dataLines *[]string) {
 		// Comment line (heartbeat)
 		comment := strings.TrimSpace(strings.TrimPrefix(line, ":"))
 		if comment == "hb" {
-			event.Type = "hb"
+			event.Type = EventTypeComment
 			event.Data = []byte("hb")
 		}
 		// Regular comments are ignored

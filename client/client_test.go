@@ -472,6 +472,35 @@ func TestClient_Connect_RetryAfterFailure(t *testing.T) {
 	assert.NotErrorIs(t, err, ErrClientAlreadyConnected, "Expected failed connect to clear the connection")
 }
 
+func TestClient_SkipsHeartbeats(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(": hb\n\nid: 1\ndata: test\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil)
+
+	received := make(chan sse.Event, 2)
+	client.OnMessage(func(event sse.Event) {
+		received <- event
+	})
+
+	assert.NoError(t, client.Connect(), "Expected connect to succeed")
+	defer client.Disconnect()
+
+	// The heartbeat precedes the event on the stream, so it would be received first
+	select {
+	case event := <-received:
+		assert.Equal(t, "1", event.ID, "Expected the heartbeat to be skipped")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected to receive the event")
+	}
+}
+
 func TestClient_ReconnectAfterServerClose(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

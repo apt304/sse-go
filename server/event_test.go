@@ -159,7 +159,7 @@ func TestParseEvent(t *testing.T) {
 			name:  "heartbeat comment",
 			input: ": hb\n\n",
 			expected: Event{
-				Type: "hb",
+				Type: EventTypeComment,
 				Data: []byte("hb"),
 			},
 		},
@@ -232,6 +232,12 @@ func TestParseEvent(t *testing.T) {
 			assert.Equal(t, tt.expected.Data, event.Data)
 		})
 	}
+}
+
+func TestParseEvent_Heartbeat(t *testing.T) {
+	event, err := ParseEvent(bufio.NewReader(strings.NewReader(heartbeatComment.String())))
+	assert.NoError(t, err)
+	assert.True(t, event.IsHeartbeat(), "Expected a parsed heartbeat to be recognized as a heartbeat")
 }
 
 func TestParseEvent_EOF(t *testing.T) {
@@ -354,7 +360,7 @@ func TestParseEvent_LineEndings(t *testing.T) {
 			name:  "Heartbeat with CRLF",
 			input: ": hb\r\n\r\n",
 			expected: Event{
-				Type: "hb",
+				Type: EventTypeComment,
 				Data: []byte("hb"),
 			},
 		},
