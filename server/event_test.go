@@ -200,9 +200,10 @@ func TestParseEvent(t *testing.T) {
 			name:  "event with spaces in fields",
 			input: "id:  123  \nevent:  test  \ndata:  hello world  \n\n",
 			expected: Event{
-				ID:   "123",
-				Type: "test",
-				Data: []byte("hello world"),
+				// Only the single space after the colon is removed
+				ID:   " 123  ",
+				Type: " test  ",
+				Data: []byte(" hello world  "),
 			},
 		},
 		{
@@ -259,6 +260,18 @@ func TestEvent_Write_LineBreakInField(t *testing.T) {
 			assert.Empty(t, buf.String(), "Expected nothing to be written")
 		})
 	}
+}
+
+func TestParseEvent_PreservesWhitespace(t *testing.T) {
+	event := Event{ID: " id ", Data: []byte("  indented  ")}
+
+	var buf bytes.Buffer
+	assert.NoError(t, event.Write(&buf))
+
+	parsed, err := ParseEvent(bufio.NewReader(&buf))
+	assert.NoError(t, err)
+	assert.Equal(t, event.ID, parsed.ID, "Expected ID whitespace to be preserved")
+	assert.Equal(t, event.Data, parsed.Data, "Expected data whitespace to be preserved")
 }
 
 func TestParseEvent_EOF(t *testing.T) {
