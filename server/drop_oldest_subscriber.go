@@ -168,13 +168,16 @@ func (s *DropOldestSubscriber) Publish(event Event, topics ...string) error {
 // Shutdown shuts down the subscriber. It is safe to call multiple times. It waits for subscribers to finish
 // until ctx is done, then sets an immediate write deadline on remaining connections and returns ctx.Err().
 func (s *DropOldestSubscriber) Shutdown(ctx context.Context) error {
+	// Check and close under s.mu so concurrent calls close s.close once
+	s.mu.Lock()
 	select {
 	case <-s.close:
+		s.mu.Unlock()
 		return nil
 	default:
 	}
-
 	close(s.close)
+	s.mu.Unlock()
 
 	// Wait for all subscribers to finish
 	finished := make(chan struct{})
