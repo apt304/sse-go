@@ -43,25 +43,26 @@ func NewDropOldestSubscriber(opts Options) *DropOldestSubscriber {
 }
 
 func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, lifecycleHooks LifecycleHooks) error {
+	// Check and register under s.mu so Shutdown cannot close s.close between the check and wg.Add
+	s.mu.Lock()
 	select {
 	case <-s.close:
+		s.mu.Unlock()
 		return ErrSubscriberClosed
 	default:
 	}
 
 	if len(sub.Topics) == 0 {
+		s.mu.Unlock()
 		return ErrNoTopics
 	}
 
 	s.wg.Add(1)
 	defer s.wg.Done()
-
 	subChan := &subscriptionChan{
 		Subscription: sub,
 		events:       make(chan []byte, s.opts.Buffer),
 	}
-
-	s.mu.Lock()
 	s.subscribers = append(s.subscribers, subChan)
 	s.mu.Unlock()
 
