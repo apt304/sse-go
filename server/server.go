@@ -24,8 +24,9 @@ func NewServer(subscriber Subscriber) *Server {
 	}
 }
 
-// ServeHTTP handles SSE connections. Callers must not set the http status response after ServeHTTP returns. It automatically
-// returns 200 OK for successful connections (default HTTP status), and 500 Internal Server Error on error.
+// ServeHTTP handles SSE connections. Callers must not set the http status response after ServeHTTP returns. It returns
+// 500 Internal Server Error if there are no topics or the response cannot be flushed. Otherwise it returns 200 OK, and
+// later errors end the stream.
 func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request, topics []string, lifecycleHooks LifecycleHooks) {
 	ctx := r.Context()
 
@@ -37,20 +38,26 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request, topics []strin
 
 	s.setSSEHeaders(w, r)
 
+	// Flush the headers before writing the body. A writer that cannot flush is closed with status 500.
 	rc := http.NewResponseController(w)
-	_, err := w.Write(connectedCommentBytes)
+	err := rc.Flush()
 	if err != nil {
-		err = fmt.Errorf("unable to write sse headers and connected comment on connection: %w", err)
-		slog.WarnContext(ctx, "sse: unable to write sse headers and connected comment on connection", "error", err)
+		err = fmt.Errorf("unable to flush sse headers on connection: %w", err)
+		slog.WarnContext(ctx, "sse: unable to flush sse headers on connection", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// The 200 status is sent. Subsequent errors are only logged, since error text would be read as event data.
+	_, err = w.Write(connectedCommentBytes)
+	if err != nil {
+		slog.WarnContext(ctx, "sse: unable to write connected comment on connection", "error", err)
 		return
 	}
 
 	err = rc.Flush()
 	if err != nil {
-		err = fmt.Errorf("unable to flush sse headers and connected comment on connection: %w", err)
-		slog.WarnContext(ctx, "sse: unable to flush sse headers on connection", "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		slog.WarnContext(ctx, "sse: unable to flush connected comment on connection", "error", err)
 		return
 	}
 
@@ -64,17 +71,10 @@ func (s Server) ServeHTTP(w http.ResponseWriter, r *http.Request, topics []strin
 
 	if err = s.subscriber.Subscribe(ctx, sub, lifecycleHooks); err != nil {
 		slog.WarnContext(ctx, "sse: subscribe error", "error", err)
-
-		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	slog.DebugContext(ctx, "sse: session ended")
-
-	// Note: We don't call WriteHeader here because:
-	// 1. HTTP status should only be written once at the beginning
-	// 2. For successful SSE connections, the default 200 status is appropriate
-	// 3. Error cases already call http.Error which writes the status
 }
 
 // setSSEHeaders sets the appropriate headers for SSE

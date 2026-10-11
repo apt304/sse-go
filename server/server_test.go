@@ -238,7 +238,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 
 				// Verify that the error message is written
 				body := nonFlushableWriter.body.String()
-				assert.Contains(t, body, "unable to flush sse headers and connected comment on connection")
+				assert.Contains(t, body, "unable to flush sse headers on connection")
 			})
 
 			t.Run("flush error after headers", func(t *testing.T) {
@@ -262,7 +262,7 @@ func TestServer_ServeHTTP(t *testing.T) {
 
 				// Verify that the error message is written
 				body := flushErrorWriter.body.String()
-				assert.Contains(t, body, "unable to flush sse headers and connected comment on connection")
+				assert.Contains(t, body, "unable to flush sse headers on connection")
 			})
 
 			t.Run("subscribe error", func(t *testing.T) {
@@ -280,11 +280,8 @@ func TestServer_ServeHTTP(t *testing.T) {
 				req := httptest.NewRequest("GET", "/events", nil)
 				server.ServeHTTP(testResponseWriter, req, []string{"test"}, LifecycleHooks{})
 
-				// Verify that the response status is set to 500 Internal Server Error
-				assert.Equal(t, http.StatusInternalServerError, testResponseWriter.statusCode)
-
-				// Verify that the error message is written
-				assert.Contains(t, testResponseWriter.body.String(), "subscriber closed")
+				// The stream has started, so the error ends it without writing error text
+				assert.Equal(t, ": connected\n\n", testResponseWriter.body.String())
 			})
 		})
 	}
@@ -500,7 +497,7 @@ func (w *flushErrorResponseWriter) WriteHeader(statusCode int) {
 	w.statusCode = statusCode
 }
 
-func (w *flushErrorResponseWriter) Flush() error {
+func (w *flushErrorResponseWriter) FlushError() error {
 	return fmt.Errorf("unable to flush sse headers on connection")
 }
 
@@ -526,3 +523,60 @@ func (w *testResponseWriter) WriteHeader(statusCode int) {
 }
 
 func (w *testResponseWriter) Flush() {}
+
+// flushFailRecorder is a ResponseRecorder whose flushes fail after the first okFlushes.
+type flushFailRecorder struct {
+	*httptest.ResponseRecorder
+	okFlushes int
+	flushes   int
+}
+
+func (w *flushFailRecorder) FlushError() error {
+	w.flushes++
+	if w.flushes > w.okFlushes {
+		return fmt.Errorf("flush failed")
+	}
+	w.ResponseRecorder.Flush()
+	return nil
+}
+
+// ResponseRecorder, like net/http, keeps the first status once the response is flushed or written.
+func TestServer_ServeHTTP_ErrorResponses(t *testing.T) {
+	t.Run("headers flush error returns 500", func(t *testing.T) {
+		server := NewServer(NewDropOldestSubscriber(Options{}))
+
+		w := &flushFailRecorder{ResponseRecorder: httptest.NewRecorder()}
+		server.ServeHTTP(w, httptest.NewRequest("GET", "/events", nil), []string{"test"}, LifecycleHooks{})
+
+		assert.Equal(t, http.StatusInternalServerError, w.Code)
+		assert.Contains(t, w.Body.String(), "flush failed")
+		assert.NotContains(t, w.Body.String(), ": connected")
+	})
+
+	t.Run("connected comment flush error ends the stream", func(t *testing.T) {
+		server := NewServer(NewDropOldestSubscriber(Options{}))
+
+		// A cancelled request ends Subscribe if the flush error is not handled, instead of blocking the test
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		req := httptest.NewRequest("GET", "/events", nil).WithContext(ctx)
+
+		w := &flushFailRecorder{ResponseRecorder: httptest.NewRecorder(), okFlushes: 1}
+		server.ServeHTTP(w, req, []string{"test"}, LifecycleHooks{})
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, ": connected\n\n", w.Body.String(), "Expected no error text in the event stream")
+	})
+
+	t.Run("subscriber closed ends the stream", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{})
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
+		server := NewServer(subscriber)
+
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, httptest.NewRequest("GET", "/events", nil), []string{"test"}, LifecycleHooks{})
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, ": connected\n\n", w.Body.String(), "Expected no error text in the event stream")
+	})
+}
