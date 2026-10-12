@@ -159,7 +159,7 @@ func TestParseEvent(t *testing.T) {
 			name:  "heartbeat comment",
 			input: ": hb\n\n",
 			expected: Event{
-				Type: "hb",
+				Type: EventTypeComment,
 				Data: []byte("hb"),
 			},
 		},
@@ -200,9 +200,10 @@ func TestParseEvent(t *testing.T) {
 			name:  "event with spaces in fields",
 			input: "id:  123  \nevent:  test  \ndata:  hello world  \n\n",
 			expected: Event{
-				ID:   "123",
-				Type: "test",
-				Data: []byte("hello world"),
+				// Only the single space after the colon is removed
+				ID:   " 123  ",
+				Type: " test  ",
+				Data: []byte(" hello world  "),
 			},
 		},
 		{
@@ -232,6 +233,45 @@ func TestParseEvent(t *testing.T) {
 			assert.Equal(t, tt.expected.Data, event.Data)
 		})
 	}
+}
+
+func TestParseEvent_Heartbeat(t *testing.T) {
+	event, err := ParseEvent(bufio.NewReader(strings.NewReader(heartbeatComment.String())))
+	assert.NoError(t, err)
+	assert.True(t, event.IsHeartbeat(), "Expected a parsed heartbeat to be recognized as a heartbeat")
+}
+
+func TestEvent_Write_LineBreakInField(t *testing.T) {
+	tests := []struct {
+		name  string
+		event Event
+	}{
+		{name: "newline in ID", event: Event{ID: "1\nevent: injected", Data: []byte("x")}},
+		{name: "carriage return in ID", event: Event{ID: "1\revent: injected", Data: []byte("x")}},
+		{name: "newline in type", event: Event{Type: "message\ndata: injected", Data: []byte("x")}},
+		{name: "carriage return in type", event: Event{Type: "message\rdata: injected", Data: []byte("x")}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := tt.event.Write(&buf)
+			assert.ErrorIs(t, err, ErrInvalidEventField)
+			assert.Empty(t, buf.String(), "Expected nothing to be written")
+		})
+	}
+}
+
+func TestParseEvent_PreservesWhitespace(t *testing.T) {
+	event := Event{ID: " id ", Data: []byte("  indented  ")}
+
+	var buf bytes.Buffer
+	assert.NoError(t, event.Write(&buf))
+
+	parsed, err := ParseEvent(bufio.NewReader(&buf))
+	assert.NoError(t, err)
+	assert.Equal(t, event.ID, parsed.ID, "Expected ID whitespace to be preserved")
+	assert.Equal(t, event.Data, parsed.Data, "Expected data whitespace to be preserved")
 }
 
 func TestParseEvent_EOF(t *testing.T) {
@@ -354,7 +394,7 @@ func TestParseEvent_LineEndings(t *testing.T) {
 			name:  "Heartbeat with CRLF",
 			input: ": hb\r\n\r\n",
 			expected: Event{
-				Type: "hb",
+				Type: EventTypeComment,
 				Data: []byte("hb"),
 			},
 		},

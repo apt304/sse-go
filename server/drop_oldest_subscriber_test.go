@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,6 +35,13 @@ func (t *testWriter) Write(p []byte) (n int, err error) {
 	defer t.mu.Unlock()
 	t.data = append(t.data, p)
 	return len(p), nil
+}
+
+// Data returns a copy of the written data.
+func (t *testWriter) Data() [][]byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([][]byte(nil), t.data...)
 }
 
 func (t *testWriter) FlushError() error {
@@ -102,12 +112,137 @@ func (e errorWriter) Header() http.Header {
 
 func (e errorWriter) WriteHeader(_ int) {}
 
+// gateWriter blocks every Write until release is closed or a write deadline is set. started receives a value
+// when a Write begins.
+type gateWriter struct {
+	started      chan struct{}
+	release      chan struct{}
+	deadline     chan struct{}
+	deadlineOnce sync.Once
+
+	mu   sync.Mutex
+	data [][]byte
+}
+
+func newGateWriter() *gateWriter {
+	return &gateWriter{
+		started:  make(chan struct{}, 100),
+		release:  make(chan struct{}),
+		deadline: make(chan struct{}),
+	}
+}
+
+func (w *gateWriter) Write(p []byte) (int, error) {
+	select {
+	case w.started <- struct{}{}:
+	default:
+	}
+
+	select {
+	case <-w.release:
+	case <-w.deadline:
+		return 0, os.ErrDeadlineExceeded
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.data = append(w.data, p)
+	return len(p), nil
+}
+
+// Data returns a copy of the written data.
+func (w *gateWriter) Data() [][]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([][]byte(nil), w.data...)
+}
+
+// SetWriteDeadline fails blocked and future writes, as a connection does once its deadline passes.
+func (w *gateWriter) SetWriteDeadline(_ time.Time) error {
+	w.deadlineOnce.Do(func() {
+		close(w.deadline)
+	})
+	return nil
+}
+
+func (w *gateWriter) FlushError() error {
+	return nil
+}
+
+func (w *gateWriter) Header() http.Header {
+	return http.Header{}
+}
+
+func (w *gateWriter) WriteHeader(_ int) {}
+
+// subscribeAsync runs Subscribe in a goroutine and waits for OnConnect. The returned channel is closed when
+// Subscribe returns. hooks.OnConnect, if set, runs before the connection is reported.
+func subscribeAsync(t *testing.T, ctx context.Context, subscriber Subscriber, w http.ResponseWriter, hooks LifecycleHooks) <-chan struct{} {
+	t.Helper()
+
+	connected := make(chan struct{})
+	onConnect := hooks.OnConnect
+	hooks.OnConnect = func(sub Subscription) {
+		close(connected)
+		if onConnect != nil {
+			onConnect(sub)
+		}
+	}
+
+	subDone := make(chan struct{})
+	go func() {
+		assert.NoError(t, subscriber.Subscribe(ctx, Subscription{
+			Topics: []string{"test"},
+			rcw:    rcWriter{w: w, rc: http.NewResponseController(w)},
+		}, hooks))
+		close(subDone)
+	}()
+
+	select {
+	case <-connected:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected subscriber to connect")
+	}
+	return subDone
+}
+
+// waitClosed fails the test if ch is not closed within 5 seconds.
+func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal(msg)
+	}
+}
+
+// waitBlockedOnLock waits until count goroutines running fn are blocked acquiring a sync.RWMutex write lock.
+func waitBlockedOnLock(t *testing.T, fn string, count int) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		n := runtime.Stack(buf, true)
+		blocked := 0
+		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+			if strings.Contains(g, "sync.(*RWMutex).Lock") && strings.Contains(g, fn) {
+				blocked++
+			}
+		}
+		if blocked >= count {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("Expected %d goroutines in %s to block acquiring a lock", count, fn)
+}
+
 func TestDropOldestSubscriber_New(t *testing.T) {
 	t.Run("subscriber with default options", func(t *testing.T) {
 		subscriber := NewDropOldestSubscriber(Options{})
 
 		assert.NotNil(t, subscriber)
-		assert.Equal(t, 0, subscriber.opts.Buffer)
+		assert.Equal(t, 1, subscriber.opts.Buffer)
 		assert.Equal(t, time.Duration(0), subscriber.opts.HeartbeatInterval)
 	})
 
@@ -146,7 +281,7 @@ func TestDropOldestSubscriber_New(t *testing.T) {
 		})
 
 		assert.NotNil(t, subscriber)
-		assert.Equal(t, 0, subscriber.opts.Buffer)
+		assert.Equal(t, 1, subscriber.opts.Buffer)
 	})
 
 	t.Run("subscriber with negative heartbeat interval", func(t *testing.T) {
@@ -191,21 +326,24 @@ func TestDropOldestSubscriber_Subscribe(t *testing.T) {
 		subscriber := NewDropOldestSubscriber(Options{})
 		assert.NotNil(t, subscriber)
 
+		subOpened := make(chan struct{})
 		subClosed := make(chan struct{})
 
 		go func() {
-			// Subscribe blocks. Call shutdown in the onConnection callback.
+			// Subscribe blocks. Hooks run on this goroutine, so Shutdown is called from the test goroutine.
 			subErr := subscriber.Subscribe(context.Background(), Subscription{
 				Topics: []string{"test"},
 			}, LifecycleHooks{
 				OnConnect: func(sub Subscription) {
-					err := subscriber.Shutdown(context.Background())
-					assert.NoError(t, err)
+					close(subOpened)
 				},
 			})
 			assert.NoError(t, subErr)
 			close(subClosed)
 		}()
+
+		<-subOpened
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
 
 		// Wait for the subscriber to close
 		<-subClosed
@@ -217,23 +355,26 @@ func TestDropOldestSubscriber_Subscribe(t *testing.T) {
 		})
 		assert.NotNil(t, subscriber)
 
+		subOpened := make(chan struct{})
 		subClosed := make(chan struct{})
 
 		go func() {
-			// Subscribe blocks. Call shutdown in the onConnection callback.
+			// Subscribe blocks. Hooks run on this goroutine, so Shutdown is called from the test goroutine.
 			errWriter := errorWriter{}
 			subErr := subscriber.Subscribe(context.Background(), Subscription{
 				Topics: []string{"test"},
 				rcw:    rcWriter{w: errWriter, rc: http.NewResponseController(errWriter)},
 			}, LifecycleHooks{
 				OnConnect: func(sub Subscription) {
-					err := subscriber.Shutdown(context.Background())
-					assert.NoError(t, err)
+					close(subOpened)
 				},
 			})
 			assert.NoError(t, subErr)
 			close(subClosed)
 		}()
+
+		<-subOpened
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
 
 		<-subClosed
 	})
@@ -308,6 +449,31 @@ func TestDropOldestSubscriber_Subscribe(t *testing.T) {
 
 		// Verify subscribers are removed
 		assert.Equal(t, 0, len(subscriber.subscribers))
+	})
+
+	t.Run("subscribe checks closed after acquiring the lock", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{})
+		writer := NewTestWriter()
+
+		// Hold s.mu so Subscribe blocks, then close as Shutdown does
+		subscriber.mu.Lock()
+		subErr := make(chan error, 1)
+		go func() {
+			subErr <- subscriber.Subscribe(context.Background(), Subscription{
+				Topics: []string{"test"},
+				rcw:    rcWriter{w: writer, rc: http.NewResponseController(writer)},
+			}, LifecycleHooks{})
+		}()
+		waitBlockedOnLock(t, "(*DropOldestSubscriber).Subscribe", 1)
+		close(subscriber.close)
+		subscriber.mu.Unlock()
+
+		select {
+		case err := <-subErr:
+			assert.ErrorIs(t, err, ErrSubscriberClosed, "Expected Subscribe to see the subscriber closed")
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected Subscribe to return")
+		}
 	})
 }
 
@@ -403,73 +569,103 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}
 	})
 
-	t.Run("publish events to blocked subscriber drops oldest event", func(t *testing.T) {
+	t.Run("publish in OnConnect is delivered with the default buffer", func(t *testing.T) {
 		subscriber := NewDropOldestSubscriber(Options{})
-		assert.NotNil(t, subscriber)
+		writer := newGateWriter()
+		close(writer.release)
 
-		writer := NewTestSyncWriter()
+		// Publish before the worker is scheduled
+		subDone := subscribeAsync(t, context.Background(), subscriber, writer, LifecycleHooks{
+			OnConnect: func(sub Subscription) {
+				assert.NoError(t, subscriber.Publish(Event{Data: []byte("test")}, "test"))
+			},
+		})
 
-		subOpened := make(chan struct{})
-		go func() {
-			subErr := subscriber.Subscribe(context.Background(), Subscription{
-				Topics: []string{"test"},
-				rcw:    rcWriter{w: writer, rc: http.NewResponseController(writer)},
-			}, LifecycleHooks{
-				OnConnect: func(sub Subscription) {
-					close(subOpened)
-				},
-			})
-			assert.NoError(t, subErr)
-		}()
+		select {
+		case <-writer.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected the event to be written")
+		}
 
-		<-subOpened
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
+		waitClosed(t, subDone, "Expected Subscribe to return")
 
-		// Lock writer
-		writer.mu.Lock()
-		writer.wg.Add(2)
+		assert.Equal(t, [][]byte{[]byte("data: test\n\n")}, writer.Data())
+	})
 
-		err := subscriber.Publish(Event{
-			Data: []byte("test 0"),
-		}, "test")
-		assert.NoError(t, err)
+	t.Run("publish while the worker is writing is delivered with the default buffer", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{})
+		writer := newGateWriter()
+		subDone := subscribeAsync(t, context.Background(), subscriber, writer, LifecycleHooks{})
 
-		closeChan := make(chan struct{})
+		waitWrite := func() {
+			t.Helper()
+			select {
+			case <-writer.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Expected the worker to start writing")
+			}
+		}
 
-		// Publish again while the writer is locked
-		go func() {
-			err = subscriber.Publish(Event{
-				Data: []byte("test 1"),
-			}, "test")
-			assert.NoError(t, err)
+		// Block the worker writing the first event, so it is not waiting for the second
+		assert.NoError(t, subscriber.Publish(Event{Data: []byte("test 0")}, "test"))
+		waitWrite()
+		assert.NoError(t, subscriber.Publish(Event{Data: []byte("test 1")}, "test"))
 
-			// Unlock the writer
-			writer.mu.Unlock()
+		close(writer.release)
+		waitWrite()
 
-			time.Sleep(10 * time.Millisecond)
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
+		waitClosed(t, subDone, "Expected Subscribe to return")
 
-			err = subscriber.Publish(Event{
-				Data: []byte("test 2"),
-			}, "test")
-			assert.NoError(t, err)
+		assert.Equal(t, [][]byte{[]byte("data: test 0\n\n"), []byte("data: test 1\n\n")}, writer.Data())
+	})
 
-			close(closeChan)
-		}()
+	t.Run("publish events to blocked subscriber drops oldest event", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{Buffer: 1})
+		writer := newGateWriter()
+		subDone := subscribeAsync(t, context.Background(), subscriber, writer, LifecycleHooks{})
 
-		time.Sleep(100 * time.Millisecond)
+		waitWrite := func() {
+			t.Helper()
+			select {
+			case <-writer.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("Expected the worker to start writing")
+			}
+		}
 
-		<-closeChan
+		// Block the worker writing the first event
+		assert.NoError(t, subscriber.Publish(Event{Data: []byte("test 0")}, "test"))
+		waitWrite()
 
-		// Close the subscriber
-		err = subscriber.Shutdown(context.Background())
-		assert.NoError(t, err)
+		// Fill the buffer, then publish again so the buffered event is dropped
+		assert.NoError(t, subscriber.Publish(Event{Data: []byte("test 1")}, "test"))
+		assert.NoError(t, subscriber.Publish(Event{Data: []byte("test 2")}, "test"))
 
-		assert.Equal(t, 2, len(writer.data))
-		assert.Equal(t, []byte("data: test 0\n\n"), writer.data[0])
-		assert.Equal(t, []byte("data: test 2\n\n"), writer.data[1])
+		// Release the writer and wait for the buffered event to be written
+		close(writer.release)
+		waitWrite()
+
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
+		waitClosed(t, subDone, "Expected Subscribe to return")
+
+		assert.Equal(t, [][]byte{[]byte("data: test 0\n\n"), []byte("data: test 2\n\n")}, writer.Data())
+	})
+
+	t.Run("publish with line break in ID returns an error", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{Buffer: 1})
+		subDone := subscribeAsync(t, context.Background(), subscriber, NewTestWriter(), LifecycleHooks{})
+
+		err := subscriber.Publish(Event{ID: "1\nevent: injected", Data: []byte("test")}, "test")
+		assert.ErrorIs(t, err, ErrInvalidEventField)
+
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
+		waitClosed(t, subDone, "Expected Subscribe to return")
 	})
 
 	t.Run("publish with writer error", func(t *testing.T) {
-		subscriber := NewDropOldestSubscriber(Options{})
+		subscriber := NewDropOldestSubscriber(Options{Buffer: 1})
 		assert.NotNil(t, subscriber)
 
 		writer := errorWriter{
@@ -477,6 +673,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}
 
 		subOpened := make(chan struct{})
+		subDone := make(chan struct{})
 
 		go func() {
 			subErr := subscriber.Subscribe(context.Background(), Subscription{
@@ -488,6 +685,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 				},
 			})
 			assert.NoError(t, subErr)
+			close(subDone)
 		}()
 
 		<-subOpened
@@ -497,15 +695,18 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}, "test")
 		assert.NoError(t, err)
 
-		time.Sleep(100 * time.Millisecond)
-		_, open := <-subOpened
-		assert.False(t, open)
+		// Subscribe returns after removing the subscriber
+		select {
+		case <-subDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected Subscribe to return after the error")
+		}
 
 		assert.Equal(t, 0, len(subscriber.subscribers))
 	})
 
 	t.Run("publish with flusher error", func(t *testing.T) {
-		subscriber := NewDropOldestSubscriber(Options{})
+		subscriber := NewDropOldestSubscriber(Options{Buffer: 1})
 		assert.NotNil(t, subscriber)
 
 		writer := errorWriter{
@@ -513,6 +714,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}
 
 		subOpened := make(chan struct{})
+		subDone := make(chan struct{})
 
 		go func() {
 			subErr := subscriber.Subscribe(context.Background(), Subscription{
@@ -524,6 +726,7 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 				},
 			})
 			assert.NoError(t, subErr)
+			close(subDone)
 		}()
 
 		<-subOpened
@@ -533,9 +736,12 @@ func TestDropOldestSubscriber_Publish(t *testing.T) {
 		}, "test")
 		assert.NoError(t, err)
 
-		time.Sleep(100 * time.Millisecond)
-		_, open := <-subOpened
-		assert.False(t, open)
+		// Subscribe returns after removing the subscriber
+		select {
+		case <-subDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected Subscribe to return after the error")
+		}
 
 		assert.Equal(t, 0, len(subscriber.subscribers))
 	})
@@ -566,53 +772,56 @@ func TestDropOldestSubscriber_Heartbeat(t *testing.T) {
 
 		<-subOpened
 
-		time.Sleep(100 * time.Millisecond)
-
-		assert.GreaterOrEqual(t, len(writer.data), 8)
-		for i := range writer.data {
-			assert.Equal(t, []byte(": hb\n\n"), writer.data[i])
-		}
+		assert.Eventually(t, func() bool {
+			return len(writer.Data()) >= 8
+		}, 5*time.Second, time.Millisecond, "Expected heartbeats to be sent")
 
 		err := subscriber.Shutdown(context.Background())
 		assert.NoError(t, err)
+
+		for _, data := range writer.Data() {
+			assert.Equal(t, []byte(": hb\n\n"), data)
+		}
 	})
 
 	t.Run("heartbeat does not block if buffer is full", func(t *testing.T) {
 		subscriber := NewDropOldestSubscriber(Options{
-			HeartbeatInterval: 10 * time.Millisecond,
+			HeartbeatInterval: time.Millisecond,
 		})
-		assert.NotNil(t, subscriber)
+		writer := newGateWriter()
+		subDone := subscribeAsync(t, context.Background(), subscriber, writer, LifecycleHooks{})
 
-		subOpened := make(chan struct{})
+		// Block the worker writing the first heartbeat and wait for the buffer to fill
+		select {
+		case <-writer.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected the worker to start writing")
+		}
+		assert.Eventually(t, func() bool {
+			subscriber.mu.RLock()
+			defer subscriber.mu.RUnlock()
+			events := subscriber.subscribers[0].events
+			return len(events) == cap(events)
+		}, 5*time.Second, time.Millisecond, "Expected the buffer to fill")
 
-		writer := NewTestWriter()
-		writer.mu.Lock()
+		// Let further heartbeats tick while the buffer is full. A blocking send would leave the heartbeat goroutine
+		// waiting on the full channel, since the worker cannot receive while it is writing.
+		time.Sleep(10 * time.Millisecond)
+		buf := make([]byte, 1<<20)
+		for _, g := range strings.Split(string(buf[:runtime.Stack(buf, true)]), "\n\n") {
+			if strings.Contains(g, "(*DropOldestSubscriber).runHeartbeat") {
+				assert.NotContains(t, g, "[chan send", "Expected the heartbeat not to block on the full buffer")
+			}
+		}
 
-		go func() {
-			subErr := subscriber.Subscribe(context.Background(), Subscription{
-				Topics: []string{"test"},
-				rcw:    rcWriter{w: writer, rc: http.NewResponseController(writer)},
-			}, LifecycleHooks{
-				OnConnect: func(sub Subscription) {
-					close(subOpened)
-				},
-			})
-			assert.NoError(t, subErr)
-		}()
+		close(writer.release)
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
+		waitClosed(t, subDone, "Expected Subscribe to return")
 
-		<-subOpened
-
-		time.Sleep(100 * time.Millisecond)
-
-		writer.mu.Unlock()
-
-		time.Sleep(1 * time.Millisecond) // Allow the heartbeat to be sent
-
-		assert.LessOrEqual(t, len(writer.data), 2)
-		assert.Equal(t, []byte(": hb\n\n"), writer.data[0])
-
-		err := subscriber.Shutdown(context.Background())
-		assert.NoError(t, err)
+		data := writer.Data()
+		if assert.NotEmpty(t, data) {
+			assert.Equal(t, []byte(": hb\n\n"), data[0])
+		}
 	})
 
 	// t.Run("heartbeat is sent with heartbeat interval", func(t *testing.T) {
@@ -626,6 +835,89 @@ func TestDropOldestSubscriber_Heartbeat(t *testing.T) {
 	// 		HeartbeatInterval: 0,
 	// 	})
 	// })
+}
+
+func TestDropOldestSubscriber_LifecycleHooks(t *testing.T) {
+	t.Run("hooks run in order on the Subscribe goroutine", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var mu sync.Mutex
+		var calls []string
+		record := func(name string) {
+			// A hook called synchronously has Subscribe on its stack. A hook started with go only names its
+			// creator on the "created by" line.
+			buf := make([]byte, 1<<16)
+			stack := string(buf[:runtime.Stack(buf, false)])
+			if i := strings.Index(stack, "created by"); i >= 0 {
+				stack = stack[:i]
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, fmt.Sprintf("%s called from Subscribe: %t", name, strings.Contains(stack, "(*DropOldestSubscriber).Subscribe")))
+		}
+
+		subDone := subscribeAsync(t, ctx, subscriber, NewTestWriter(), LifecycleHooks{
+			OnConnect: func(sub Subscription) {
+				record("OnConnect")
+			},
+			OnDisconnect: func(sub Subscription) {
+				record("OnDisconnect")
+			},
+		})
+
+		cancel()
+		waitClosed(t, subDone, "Expected Subscribe to return")
+
+		mu.Lock()
+		defer mu.Unlock()
+		assert.Equal(t, []string{
+			"OnConnect called from Subscribe: true",
+			"OnDisconnect called from Subscribe: true",
+		}, calls, "Expected both hooks to run in order on the Subscribe goroutine before it returns")
+	})
+
+	t.Run("OnConnect panic stops the workers and removes the subscriber", func(t *testing.T) {
+		// Fails if the worker or heartbeat goroutine started by this subtest is still running
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		subscriber := NewDropOldestSubscriber(Options{HeartbeatInterval: time.Hour})
+		writer := NewTestWriter()
+
+		// OnDisconnect runs on the Subscribe goroutine, which is done before panicked is received
+		disconnected := false
+		panicked := make(chan any, 1)
+		go func() {
+			defer func() {
+				panicked <- recover()
+			}()
+			_ = subscriber.Subscribe(context.Background(), Subscription{
+				Topics: []string{"test"},
+				rcw:    rcWriter{w: writer, rc: http.NewResponseController(writer)},
+			}, LifecycleHooks{
+				OnConnect: func(sub Subscription) {
+					panic("hook panic")
+				},
+				OnDisconnect: func(sub Subscription) {
+					disconnected = true
+				},
+			})
+		}()
+
+		select {
+		case p := <-panicked:
+			assert.Equal(t, "hook panic", p, "Expected the panic to propagate from Subscribe")
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected Subscribe to panic")
+		}
+
+		subscriber.mu.RLock()
+		assert.Empty(t, subscriber.subscribers, "Expected the subscriber to be removed")
+		subscriber.mu.RUnlock()
+		assert.False(t, disconnected, "Expected OnDisconnect not to run after OnConnect panics")
+	})
 }
 
 func TestDropOldestSubscriber_Shutdown(t *testing.T) {
@@ -646,5 +938,62 @@ func TestDropOldestSubscriber_Shutdown(t *testing.T) {
 
 		err = subscriber.Shutdown(context.Background())
 		assert.NoError(t, err)
+	})
+
+	t.Run("concurrent shutdowns check closed after acquiring the lock", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{})
+
+		// Hold s.mu so both calls block before checking whether the subscriber is closed
+		subscriber.mu.Lock()
+		shutdownErr := make(chan error, 2)
+		for range 2 {
+			go func() {
+				shutdownErr <- subscriber.Shutdown(context.Background())
+			}()
+		}
+		waitBlockedOnLock(t, "(*DropOldestSubscriber).Shutdown", 2)
+		subscriber.mu.Unlock()
+
+		for range 2 {
+			select {
+			case err := <-shutdownErr:
+				assert.NoError(t, err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Expected Shutdown to return")
+			}
+		}
+	})
+
+	t.Run("shutdown returns when the context expires with a blocked writer", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{Buffer: 1})
+		writer := newGateWriter()
+		defer close(writer.release)
+		subDone := subscribeAsync(t, context.Background(), subscriber, writer, LifecycleHooks{})
+
+		// Block the worker in Write
+		assert.NoError(t, subscriber.Publish(Event{Data: []byte("test")}, "test"))
+		select {
+		case <-writer.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected the worker to start writing")
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+		defer cancel()
+
+		shutdownErr := make(chan error, 1)
+		go func() {
+			shutdownErr <- subscriber.Shutdown(ctx)
+		}()
+
+		select {
+		case err := <-shutdownErr:
+			assert.ErrorIs(t, err, context.DeadlineExceeded, "Expected Shutdown to return the context error")
+		case <-time.After(5 * time.Second):
+			t.Error("Expected Shutdown to return when its context expires")
+		}
+
+		// The write deadline fails the blocked write without the writer being released
+		waitClosed(t, subDone, "Expected Subscribe to return after the write deadline")
 	})
 }

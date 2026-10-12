@@ -10,7 +10,8 @@ import (
 )
 
 type Options struct {
-	// Per-subscriber channel capacity.
+	// Per-subscriber event buffer size. When full, the oldest event is dropped. Values below 1 are set to 1, so an
+	// event published after OnConnect is held until the subscriber's worker writes it.
 	Buffer int
 	// HeartbeatInterval - set 0 to disable.
 	HeartbeatInterval time.Duration
@@ -27,8 +28,8 @@ type DropOldestSubscriber struct {
 }
 
 func NewDropOldestSubscriber(opts Options) *DropOldestSubscriber {
-	if opts.Buffer < 0 {
-		opts.Buffer = 0
+	if opts.Buffer < 1 {
+		opts.Buffer = 1
 	}
 	if opts.HeartbeatInterval < 0 {
 		opts.HeartbeatInterval = 0
@@ -43,36 +44,62 @@ func NewDropOldestSubscriber(opts Options) *DropOldestSubscriber {
 }
 
 func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, lifecycleHooks LifecycleHooks) error {
+	// Check and register under s.mu so Shutdown cannot close s.close between the check and wg.Add
+	s.mu.Lock()
 	select {
 	case <-s.close:
+		s.mu.Unlock()
 		return ErrSubscriberClosed
 	default:
 	}
 
 	if len(sub.Topics) == 0 {
+		s.mu.Unlock()
 		return ErrNoTopics
 	}
 
 	s.wg.Add(1)
 	defer s.wg.Done()
-
 	subChan := &subscriptionChan{
 		Subscription: sub,
 		events:       make(chan []byte, s.opts.Buffer),
 	}
-
-	s.mu.Lock()
 	s.subscribers = append(s.subscribers, subChan)
 	s.mu.Unlock()
 
 	// Start the subscriber worker
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go s.run(subChan, lifecycleHooks, stop, done)
+	go s.run(subChan, stop, done)
+
+	// Stop the workers and remove the subscriber. Deferred so it also runs if a hook panics.
+	stopWorkers := sync.OnceFunc(func() {
+		// signal the subscriber and heartbeat workers to stop
+		close(stop)
+
+		// Wait for run() to stop writing to the response
+		<-done
+
+		// Remove the subscriber from the list
+		s.mu.Lock()
+		for i, subscriber := range s.subscribers {
+			if subscriber == subChan {
+				s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
+				break
+			}
+		}
+		s.mu.Unlock()
+	})
+	defer stopWorkers()
 
 	// Start heartbeat goroutine if enabled
 	if s.opts.HeartbeatInterval > 0 {
 		go s.runHeartbeat(subChan, stop)
+	}
+
+	// The subscriber is registered, so events published from here on are buffered for the worker
+	if lifecycleHooks.OnConnect != nil {
+		lifecycleHooks.OnConnect(sub)
 	}
 
 	// Block until the context, the provider, or the subscriber done channel is closed.
@@ -85,18 +112,11 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 		slog.Debug("subscriber done")
 	}
 
-	// signal the subscriber and heartbeat workers to stop
-	close(stop)
+	stopWorkers()
 
-	// Remove the subscriber from the list
-	s.mu.Lock()
-	for i, subscriber := range s.subscribers {
-		if subscriber == subChan {
-			s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
-			break
-		}
+	if lifecycleHooks.OnDisconnect != nil {
+		lifecycleHooks.OnDisconnect(sub)
 	}
-	s.mu.Unlock()
 
 	return nil
 }
@@ -162,20 +182,42 @@ func (s *DropOldestSubscriber) Publish(event Event, topics ...string) error {
 	return nil
 }
 
-// Shutdown shuts down the subscriber. It is safe to call multiple times.
+// Shutdown shuts down the subscriber. It is safe to call multiple times. It waits for subscribers to finish
+// until ctx is done, then sets an immediate write deadline on remaining connections and returns ctx.Err().
 func (s *DropOldestSubscriber) Shutdown(ctx context.Context) error {
+	// Check and close under s.mu so concurrent calls close s.close once
+	s.mu.Lock()
 	select {
 	case <-s.close:
+		s.mu.Unlock()
 		return nil
 	default:
 	}
-
 	close(s.close)
+	s.mu.Unlock()
 
 	// Wait for all subscribers to finish
-	s.wg.Wait()
+	finished := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(finished)
+	}()
 
-	return nil
+	select {
+	case <-finished:
+		return nil
+	case <-ctx.Done():
+	}
+
+	// Fail writes blocked on clients that are not reading. Subscribers are removed under s.mu before
+	// Subscribe returns, so each response is still active. Writers without deadline support are skipped.
+	s.mu.RLock()
+	for _, sub := range s.subscribers {
+		_ = sub.rcw.rc.SetWriteDeadline(time.Now())
+	}
+	s.mu.RUnlock()
+
+	return ctx.Err()
 }
 
 type subscriptionChan struct {
@@ -183,17 +225,9 @@ type subscriptionChan struct {
 	events chan []byte
 }
 
-func (s *DropOldestSubscriber) run(sub *subscriptionChan, lifecycleHooks LifecycleHooks, stop, done chan struct{}) {
-	if lifecycleHooks.OnDisconnect != nil {
-		defer func() {
-			go lifecycleHooks.OnDisconnect(sub.Subscription)
-		}()
-	}
-
-	// Signal that the subscriber is ready
-	if lifecycleHooks.OnConnect != nil {
-		go lifecycleHooks.OnConnect(sub.Subscription)
-	}
+// run writes events to the subscriber until stop is closed or a write fails. It closes done when it returns.
+func (s *DropOldestSubscriber) run(sub *subscriptionChan, stop, done chan struct{}) {
+	defer close(done)
 
 	for {
 		select {
@@ -203,13 +237,11 @@ func (s *DropOldestSubscriber) run(sub *subscriptionChan, lifecycleHooks Lifecyc
 			if _, err := sub.rcw.Write(evt); err != nil {
 				// On write error, stop work and remove the subscriber
 				slog.Warn("subscriber write error", "error", err)
-				close(done)
 				return
 			}
 			if err := sub.rcw.Flush(); err != nil {
 				// On flush error, stop work and remove the subscriber
 				slog.Warn("subscriber flush error", "error", err)
-				close(done)
 				return
 			}
 		}

@@ -62,6 +62,11 @@ func (e Event) Write(w io.Writer) error {
 		return err
 	}
 
+	// A line break would end the field and start another. ID and type lines cannot be joined like data lines.
+	if strings.ContainsAny(e.ID, "\r\n") || strings.ContainsAny(e.Type, "\r\n") {
+		return ErrInvalidEventField
+	}
+
 	if e.ID != "" {
 		_, err := builder.WriteString("id: ")
 		if err != nil {
@@ -265,25 +270,27 @@ func ParseEvent(reader *bufio.Reader) (Event, error) {
 func processLine(line string, event *Event, dataLines *[]string) {
 	// Parse event fields
 	if strings.HasPrefix(line, "id:") {
-		event.ID = strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+		event.ID = fieldValue(line, "id:")
 	} else if strings.HasPrefix(line, "event:") {
-		event.Type = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+		event.Type = fieldValue(line, "event:")
 	} else if strings.HasPrefix(line, "retry:") {
-		retryStr := strings.TrimSpace(strings.TrimPrefix(line, "retry:"))
-		if retry, err := strconv.Atoi(retryStr); err == nil {
+		if retry, err := strconv.Atoi(fieldValue(line, "retry:")); err == nil {
 			event.Retry = retry
 		}
 	} else if strings.HasPrefix(line, "data:") {
 		// Handle multi-line data by collecting all data: lines
-		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		*dataLines = append(*dataLines, data)
+		*dataLines = append(*dataLines, fieldValue(line, "data:"))
 	} else if strings.HasPrefix(line, ":") {
 		// Comment line (heartbeat)
-		comment := strings.TrimSpace(strings.TrimPrefix(line, ":"))
-		if comment == "hb" {
-			event.Type = "hb"
+		if fieldValue(line, ":") == "hb" {
+			event.Type = EventTypeComment
 			event.Data = []byte("hb")
 		}
 		// Regular comments are ignored
 	}
+}
+
+// fieldValue returns the value after the field prefix. Per the SSE spec, only a single leading space is removed.
+func fieldValue(line, prefix string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(line, prefix), " ")
 }

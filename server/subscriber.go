@@ -37,11 +37,13 @@ func (w rcWriter) Flush() error {
 
 type LifecycleHook func(sub Subscription)
 
+// LifecycleHooks are called synchronously on the goroutine that called Subscribe. They must not block for long, as
+// they delay the stream and Shutdown, and must not call Shutdown, which waits for them to return.
 type LifecycleHooks struct {
 	// OnConnect is called after the SSE connection is fully established. It is safe
 	// to send events to the subscriber after this hook is called.
 	OnConnect LifecycleHook
-	// OnDisconnect is called after the SSE connection is closed. Events sent to the
+	// OnDisconnect is called after the SSE connection is closed, before Subscribe returns. Events sent to the
 	// subscriber after this hook is called will not be delivered.
 	OnDisconnect LifecycleHook
 }

@@ -8,7 +8,7 @@ A minimal, high-performance Server-Sent Events (SSE) implementation in Go. This 
 - **Heartbeat Support**: Configurable heartbeat comments to keep connections alive
 - **Lifecycle Hooks**: Connection lifecycle callbacks (OnConnect, OnDisconnect)
 - **Graceful Shutdown**: Clean resource cleanup with synchronous shutdown
-- **Default Server Implementation**: Configurable per-subscriber event buffers with drop-oldest strategy
+- **Default Server Implementation**: Configurable per-subscriber event buffers with drop-oldest strategy. Consumers are isolated, so one slow reader won't block other connections.
 - **Go Client**: High-level client API with automatic reconnection and event handling
 
 ## Installation
@@ -115,7 +115,7 @@ type LifecycleHooks struct {
 *Server Options*
 ```go
 type Options struct {
-    Buffer             int           // Per-subscriber event buffer size
+    Buffer             int           // Per-subscriber event buffer size (minimum 1, oldest dropped when full)
     HeartbeatInterval  time.Duration // Heartbeat frequency (0 = disabled)
 }
 ```
