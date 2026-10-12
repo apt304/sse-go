@@ -21,7 +21,7 @@ func TestClientIntegration(t *testing.T) {
 	// Create SSE server
 	sseServer := sse.NewServer(subscriber)
 
-	// The server runs lifecycle hooks in their own goroutines. Wait on them instead of sleeping.
+	// Lifecycle hooks run on the server handler goroutines. Wait on them instead of sleeping.
 	connected := make(chan struct{}, 2)
 	disconnected := make(chan struct{}, 2)
 

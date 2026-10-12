@@ -312,21 +312,24 @@ func TestDropOldestSubscriber_Subscribe(t *testing.T) {
 		subscriber := NewDropOldestSubscriber(Options{})
 		assert.NotNil(t, subscriber)
 
+		subOpened := make(chan struct{})
 		subClosed := make(chan struct{})
 
 		go func() {
-			// Subscribe blocks. Call shutdown in the onConnection callback.
+			// Subscribe blocks. Hooks run on this goroutine, so Shutdown is called from the test goroutine.
 			subErr := subscriber.Subscribe(context.Background(), Subscription{
 				Topics: []string{"test"},
 			}, LifecycleHooks{
 				OnConnect: func(sub Subscription) {
-					err := subscriber.Shutdown(context.Background())
-					assert.NoError(t, err)
+					close(subOpened)
 				},
 			})
 			assert.NoError(t, subErr)
 			close(subClosed)
 		}()
+
+		<-subOpened
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
 
 		// Wait for the subscriber to close
 		<-subClosed
@@ -338,23 +341,26 @@ func TestDropOldestSubscriber_Subscribe(t *testing.T) {
 		})
 		assert.NotNil(t, subscriber)
 
+		subOpened := make(chan struct{})
 		subClosed := make(chan struct{})
 
 		go func() {
-			// Subscribe blocks. Call shutdown in the onConnection callback.
+			// Subscribe blocks. Hooks run on this goroutine, so Shutdown is called from the test goroutine.
 			errWriter := errorWriter{}
 			subErr := subscriber.Subscribe(context.Background(), Subscription{
 				Topics: []string{"test"},
 				rcw:    rcWriter{w: errWriter, rc: http.NewResponseController(errWriter)},
 			}, LifecycleHooks{
 				OnConnect: func(sub Subscription) {
-					err := subscriber.Shutdown(context.Background())
-					assert.NoError(t, err)
+					close(subOpened)
 				},
 			})
 			assert.NoError(t, subErr)
 			close(subClosed)
 		}()
+
+		<-subOpened
+		assert.NoError(t, subscriber.Shutdown(context.Background()))
 
 		<-subClosed
 	})
@@ -796,6 +802,49 @@ func TestDropOldestSubscriber_Heartbeat(t *testing.T) {
 	// 		HeartbeatInterval: 0,
 	// 	})
 	// })
+}
+
+func TestDropOldestSubscriber_LifecycleHooks(t *testing.T) {
+	t.Run("hooks run in order on the Subscribe goroutine", func(t *testing.T) {
+		subscriber := NewDropOldestSubscriber(Options{})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var mu sync.Mutex
+		var calls []string
+		record := func(name string) {
+			// A hook called synchronously has Subscribe on its stack. A hook started with go only names its
+			// creator on the "created by" line.
+			buf := make([]byte, 1<<16)
+			stack := string(buf[:runtime.Stack(buf, false)])
+			if i := strings.Index(stack, "created by"); i >= 0 {
+				stack = stack[:i]
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, fmt.Sprintf("%s called from Subscribe: %t", name, strings.Contains(stack, "(*DropOldestSubscriber).Subscribe")))
+		}
+
+		subDone := subscribeAsync(t, ctx, subscriber, NewTestWriter(), LifecycleHooks{
+			OnConnect: func(sub Subscription) {
+				record("OnConnect")
+			},
+			OnDisconnect: func(sub Subscription) {
+				record("OnDisconnect")
+			},
+		})
+
+		cancel()
+		waitClosed(t, subDone, "Expected Subscribe to return")
+
+		mu.Lock()
+		defer mu.Unlock()
+		assert.Equal(t, []string{
+			"OnConnect called from Subscribe: true",
+			"OnDisconnect called from Subscribe: true",
+		}, calls, "Expected both hooks to run in order on the Subscribe goroutine before it returns")
+	})
 }
 
 func TestDropOldestSubscriber_Shutdown(t *testing.T) {

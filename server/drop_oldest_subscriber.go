@@ -67,13 +67,21 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 	s.mu.Unlock()
 
 	// Start the subscriber worker
+	ready := make(chan struct{})
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go s.run(subChan, lifecycleHooks, stop, done)
+	go s.run(subChan, ready, stop, done)
 
 	// Start heartbeat goroutine if enabled
 	if s.opts.HeartbeatInterval > 0 {
 		go s.runHeartbeat(subChan, stop)
+	}
+
+	// The subscriber is registered and its worker is about to wait for events, so events published from here on are
+	// delivered. With Buffer 0, an event is only delivered while the worker is waiting.
+	<-ready
+	if lifecycleHooks.OnConnect != nil {
+		lifecycleHooks.OnConnect(sub)
 	}
 
 	// Block until the context, the provider, or the subscriber done channel is closed.
@@ -101,6 +109,10 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 		}
 	}
 	s.mu.Unlock()
+
+	if lifecycleHooks.OnDisconnect != nil {
+		lifecycleHooks.OnDisconnect(sub)
+	}
 
 	return nil
 }
@@ -209,18 +221,11 @@ type subscriptionChan struct {
 	events chan []byte
 }
 
-func (s *DropOldestSubscriber) run(sub *subscriptionChan, lifecycleHooks LifecycleHooks, stop, done chan struct{}) {
+// run writes events to the subscriber until stop is closed or a write fails. It closes ready before waiting for
+// events, and done when it returns.
+func (s *DropOldestSubscriber) run(sub *subscriptionChan, ready, stop, done chan struct{}) {
 	defer close(done)
-	if lifecycleHooks.OnDisconnect != nil {
-		defer func() {
-			go lifecycleHooks.OnDisconnect(sub.Subscription)
-		}()
-	}
-
-	// Signal that the subscriber is ready
-	if lifecycleHooks.OnConnect != nil {
-		go lifecycleHooks.OnConnect(sub.Subscription)
-	}
+	close(ready)
 
 	for {
 		select {
