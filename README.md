@@ -234,6 +234,32 @@ The client supports automatic reconnection with exponential backoff. Configure t
 
 **Jitter**: The client automatically adds +/- 2% random jitter to backoff delays to prevent multiple clients from reconnecting simultaneously (thundering herd problem).
 
+#### Headers
+`Options.Header` is sent on every connection request, including reconnects. It is copied by `NewClient`, so later changes have no effect. `Accept`, `Cache-Control`, and `Last-Event-ID` are managed by the client and ignored.
+
+```go
+opts := DefaultOptions()
+opts.Header = http.Header{"Authorization": {"Bearer " + token}}
+client := NewClient("http://localhost:8080/events", nil, opts)
+```
+
+For headers that change between requests, such as refreshed tokens, set them in a custom `http.RoundTripper` on `Options.HTTPClient`:
+
+```go
+type authTransport struct {
+    token func() string
+}
+
+func (t authTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+    r = r.Clone(r.Context())
+    r.Header.Set("Authorization", "Bearer "+t.token())
+    return http.DefaultTransport.RoundTrip(r)
+}
+
+opts := DefaultOptions()
+opts.HTTPClient = &http.Client{Transport: authTransport{token: tokenSource}}
+```
+
 #### Topics
 Topics can be specified when creating the client and will be sent as query parameters:
 

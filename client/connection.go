@@ -20,7 +20,7 @@ type Connection struct {
 	topics        []string
 	lastEventIDMu sync.RWMutex
 	lastEventID   string
-	headers       map[string]string
+	headers       http.Header
 	ctx           context.Context
 	cancel        context.CancelFunc
 }
@@ -39,15 +39,15 @@ func NewConnection(url string, buffer int, httpClient *http.Client, topics ...st
 		url:     url,
 		buffer:  buffer,
 		topics:  topics,
-		headers: make(map[string]string),
+		headers: make(http.Header),
 		ctx:     ctx,
 		cancel:  cancel,
 	}
 }
 
-// SetHeader sets a custom HTTP header
+// SetHeader sets a custom HTTP header. Accept, Cache-Control, and Last-Event-ID are managed by the connection and ignored.
 func (c *Connection) SetHeader(key, value string) {
-	c.headers[key] = value
+	c.headers.Set(key, value)
 }
 
 // SetLastEventID sets the Last-Event-ID header for reconnection
@@ -64,21 +64,20 @@ func (c *Connection) Connect() (<-chan sse.Event, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
+	// Set custom headers first so the SSE headers take precedence
+	req.Header = c.headers.Clone()
+
 	// Set SSE headers
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 
-	// Set Last-Event-ID if provided
+	// Set Last-Event-ID if provided. Use SetLastEventID instead of SetHeader.
+	req.Header.Del("Last-Event-ID")
 	c.lastEventIDMu.RLock()
 	if c.lastEventID != "" {
 		req.Header.Set("Last-Event-ID", c.lastEventID)
 	}
 	c.lastEventIDMu.RUnlock()
-
-	// Set custom headers
-	for key, value := range c.headers {
-		req.Header.Set(key, value)
-	}
 
 	// Add topics as query parameters if provided
 	if len(c.topics) > 0 {
