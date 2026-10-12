@@ -621,3 +621,44 @@ func newFailingServer(t *testing.T) *httptest.Server {
 	t.Cleanup(server.Close)
 	return server
 }
+
+func TestClient_Header_SentOnReconnect(t *testing.T) {
+	received := make(chan http.Header, 2)
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		// Close the first stream to trigger a reconnect
+		if requests.Add(1) > 1 {
+			<-r.Context().Done()
+		}
+	}))
+	defer server.Close()
+
+	header := http.Header{}
+	header.Set("Authorization", "Bearer token")
+	header.Add("X-Multi", "a")
+	header.Add("X-Multi", "b")
+
+	client := NewClient(server.URL, nil, Options{
+		Buffer:     10,
+		Reconnect:  true,
+		Backoff:    time.Millisecond,
+		MaxBackoff: time.Millisecond,
+		MaxRetries: 3,
+		Header:     header,
+	})
+	// Changes after NewClient are not sent
+	header.Set("Authorization", "changed")
+
+	assert.NoError(t, client.Connect())
+	defer client.Disconnect()
+
+	for i := range 2 {
+		got := <-received
+		assert.Equal(t, "Bearer token", got.Get("Authorization"), "Expected Authorization on request %d", i+1)
+		assert.Equal(t, []string{"a", "b"}, got.Values("X-Multi"), "Expected all values on request %d", i+1)
+	}
+}

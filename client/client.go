@@ -41,6 +41,7 @@ type Options struct {
 	MaxBackoff time.Duration // Maximum reconnection backoff.
 	MaxRetries int           // Maximum number of reconnection attempts. 0 disables reconnection.
 	HTTPClient *http.Client  // HTTP client for connections. Must not set Timeout, as it limits the lifetime of the SSE stream. nil uses the NewConnection default.
+	Header     http.Header   // Headers sent on every connection request, including reconnects. Accept, Cache-Control, and Last-Event-ID are managed by the client and ignored.
 }
 
 // DefaultOptions returns the options used when none are provided to NewClient.
@@ -84,6 +85,8 @@ func NewClient(url string, topics []string, opts ...Options) *Client {
 	if len(opts) > 0 {
 		options = opts[0]
 	}
+	// Copy so later changes by the caller do not race with reconnects
+	options.Header = options.Header.Clone()
 
 	return &Client{
 		url:           url,
@@ -138,6 +141,11 @@ func (c *Client) Connect() error {
 
 	done := c.done
 	conn := NewConnection(c.url, c.options.Buffer, c.options.HTTPClient, c.topics...)
+	for key, values := range c.options.Header {
+		for _, value := range values {
+			conn.headers.Add(key, value)
+		}
+	}
 
 	// Read current last event ID in a lock
 	c.lastEventMu.RLock()
