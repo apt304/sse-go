@@ -91,10 +91,10 @@ func BenchmarkDropOldestSubscriber(b *testing.B) {
 		buffer   int
 		subCount int
 	}{
-		{"Buffer_0_Sub_1", 0, 1},
-		{"Buffer_0_Sub_10", 0, 10},
-		{"Buffer_0_Sub_100", 0, 100},
-		{"Buffer_0_Sub_1000", 0, 1000},
+		{"Buffer_1_Sub_1", 1, 1},
+		{"Buffer_1_Sub_10", 1, 10},
+		{"Buffer_1_Sub_100", 1, 100},
+		{"Buffer_1_Sub_1000", 1, 1000},
 		{"Buffer_10_Sub_1", 10, 1},
 		{"Buffer_10_Sub_10", 10, 10},
 		{"Buffer_10_Sub_100", 10, 100},

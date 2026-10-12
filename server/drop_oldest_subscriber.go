@@ -10,7 +10,8 @@ import (
 )
 
 type Options struct {
-	// Per-subscriber channel capacity.
+	// Per-subscriber event buffer size. When full, the oldest event is dropped. Values below 1 are set to 1, so an
+	// event published after OnConnect is held until the subscriber's worker writes it.
 	Buffer int
 	// HeartbeatInterval - set 0 to disable.
 	HeartbeatInterval time.Duration
@@ -27,8 +28,8 @@ type DropOldestSubscriber struct {
 }
 
 func NewDropOldestSubscriber(opts Options) *DropOldestSubscriber {
-	if opts.Buffer < 0 {
-		opts.Buffer = 0
+	if opts.Buffer < 1 {
+		opts.Buffer = 1
 	}
 	if opts.HeartbeatInterval < 0 {
 		opts.HeartbeatInterval = 0
@@ -67,10 +68,9 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 	s.mu.Unlock()
 
 	// Start the subscriber worker
-	ready := make(chan struct{})
 	stop := make(chan struct{})
 	done := make(chan struct{})
-	go s.run(subChan, ready, stop, done)
+	go s.run(subChan, stop, done)
 
 	// Stop the workers and remove the subscriber. Deferred so it also runs if a hook panics.
 	stopWorkers := sync.OnceFunc(func() {
@@ -97,9 +97,7 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 		go s.runHeartbeat(subChan, stop)
 	}
 
-	// The subscriber is registered and its worker is about to wait for events, so events published from here on are
-	// delivered. With Buffer 0, an event is only delivered while the worker is waiting.
-	<-ready
+	// The subscriber is registered, so events published from here on are buffered for the worker
 	if lifecycleHooks.OnConnect != nil {
 		lifecycleHooks.OnConnect(sub)
 	}
@@ -227,11 +225,9 @@ type subscriptionChan struct {
 	events chan []byte
 }
 
-// run writes events to the subscriber until stop is closed or a write fails. It closes ready before waiting for
-// events, and done when it returns.
-func (s *DropOldestSubscriber) run(sub *subscriptionChan, ready, stop, done chan struct{}) {
+// run writes events to the subscriber until stop is closed or a write fails. It closes done when it returns.
+func (s *DropOldestSubscriber) run(sub *subscriptionChan, stop, done chan struct{}) {
 	defer close(done)
-	close(ready)
 
 	for {
 		select {
