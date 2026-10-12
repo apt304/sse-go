@@ -72,6 +72,26 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 	done := make(chan struct{})
 	go s.run(subChan, ready, stop, done)
 
+	// Stop the workers and remove the subscriber. Deferred so it also runs if a hook panics.
+	stopWorkers := sync.OnceFunc(func() {
+		// signal the subscriber and heartbeat workers to stop
+		close(stop)
+
+		// Wait for run() to stop writing to the response
+		<-done
+
+		// Remove the subscriber from the list
+		s.mu.Lock()
+		for i, subscriber := range s.subscribers {
+			if subscriber == subChan {
+				s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
+				break
+			}
+		}
+		s.mu.Unlock()
+	})
+	defer stopWorkers()
+
 	// Start heartbeat goroutine if enabled
 	if s.opts.HeartbeatInterval > 0 {
 		go s.runHeartbeat(subChan, stop)
@@ -94,21 +114,7 @@ func (s *DropOldestSubscriber) Subscribe(ctx context.Context, sub Subscription, 
 		slog.Debug("subscriber done")
 	}
 
-	// signal the subscriber and heartbeat workers to stop
-	close(stop)
-
-	// Wait for run() to stop writing to the response
-	<-done
-
-	// Remove the subscriber from the list
-	s.mu.Lock()
-	for i, subscriber := range s.subscribers {
-		if subscriber == subChan {
-			s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
-			break
-		}
-	}
-	s.mu.Unlock()
+	stopWorkers()
 
 	if lifecycleHooks.OnDisconnect != nil {
 		lifecycleHooks.OnDisconnect(sub)

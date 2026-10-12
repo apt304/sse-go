@@ -845,6 +845,46 @@ func TestDropOldestSubscriber_LifecycleHooks(t *testing.T) {
 			"OnDisconnect called from Subscribe: true",
 		}, calls, "Expected both hooks to run in order on the Subscribe goroutine before it returns")
 	})
+
+	t.Run("OnConnect panic stops the workers and removes the subscriber", func(t *testing.T) {
+		// Fails if the worker or heartbeat goroutine started by this subtest is still running
+		defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+
+		subscriber := NewDropOldestSubscriber(Options{HeartbeatInterval: time.Hour})
+		writer := NewTestWriter()
+
+		// OnDisconnect runs on the Subscribe goroutine, which is done before panicked is received
+		disconnected := false
+		panicked := make(chan any, 1)
+		go func() {
+			defer func() {
+				panicked <- recover()
+			}()
+			_ = subscriber.Subscribe(context.Background(), Subscription{
+				Topics: []string{"test"},
+				rcw:    rcWriter{w: writer, rc: http.NewResponseController(writer)},
+			}, LifecycleHooks{
+				OnConnect: func(sub Subscription) {
+					panic("hook panic")
+				},
+				OnDisconnect: func(sub Subscription) {
+					disconnected = true
+				},
+			})
+		}()
+
+		select {
+		case p := <-panicked:
+			assert.Equal(t, "hook panic", p, "Expected the panic to propagate from Subscribe")
+		case <-time.After(5 * time.Second):
+			t.Fatal("Expected Subscribe to panic")
+		}
+
+		subscriber.mu.RLock()
+		assert.Empty(t, subscriber.subscribers, "Expected the subscriber to be removed")
+		subscriber.mu.RUnlock()
+		assert.False(t, disconnected, "Expected OnDisconnect not to run after OnConnect panics")
+	})
 }
 
 func TestDropOldestSubscriber_Shutdown(t *testing.T) {
