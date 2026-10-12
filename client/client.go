@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net/http"
 	"sync"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 var (
 	ErrClientAlreadyConnected = fmt.Errorf("client already connected")
+	ErrClientDisconnected     = fmt.Errorf("client disconnected during connect")
 )
 
 // EventHandler is a function that handles SSE events
@@ -30,13 +32,26 @@ const (
 	StateReconnecting
 )
 
-// Options configures the SSE client
+// Options configures the SSE client. Options passed to NewClient replace DefaultOptions entirely,
+// so unset fields are zero. Start from DefaultOptions to change individual fields.
 type Options struct {
-	Buffer     int           // Per-subscriber channel capacity. Default is 10.
-	Reconnect  bool          // Enable automatic reconnection. Default is true.
-	Backoff    time.Duration // Initial reconnection backoff. Default is 1 second.
-	MaxBackoff time.Duration // Maximum reconnection backoff. Default is 30 seconds.
-	MaxRetries int           // Maximum number of reconnection attempts. Default is 3.
+	Buffer     int           // Per-subscriber channel capacity.
+	Reconnect  bool          // Enable automatic reconnection.
+	Backoff    time.Duration // Initial reconnection backoff.
+	MaxBackoff time.Duration // Maximum reconnection backoff.
+	MaxRetries int           // Maximum number of reconnection attempts. 0 disables reconnection.
+	HTTPClient *http.Client  // HTTP client for connections. Must not set Timeout, as it limits the lifetime of the SSE stream. nil uses the NewConnection default.
+}
+
+// DefaultOptions returns the options used when none are provided to NewClient.
+func DefaultOptions() Options {
+	return Options{
+		Buffer:     10,
+		Reconnect:  true,
+		Backoff:    1 * time.Second,
+		MaxBackoff: 30 * time.Second,
+		MaxRetries: 3,
+	}
 }
 
 // Client represents an SSE client
@@ -63,13 +78,7 @@ type Client struct {
 
 // NewClient creates a new SSE client
 func NewClient(url string, topics []string, opts ...Options) *Client {
-	options := Options{
-		Buffer:     10,
-		Reconnect:  true,
-		Backoff:    1 * time.Second,
-		MaxBackoff: 30 * time.Second,
-		MaxRetries: 3,
-	}
+	options := DefaultOptions()
 
 	// Apply any provided options
 	if len(opts) > 0 {
@@ -127,12 +136,17 @@ func (c *Client) Connect() error {
 		return ErrClientAlreadyConnected
 	}
 
-	conn := NewConnection(c.url, c.options.Buffer, c.topics...)
+	done := c.done
+	conn := NewConnection(c.url, c.options.Buffer, c.options.HTTPClient, c.topics...)
+
+	// Read current last event ID in a lock
 	c.lastEventMu.RLock()
-	if c.lastEventID != "" {
-		conn.SetLastEventID(c.lastEventID)
-	}
+	lastEventID := c.lastEventID
 	c.lastEventMu.RUnlock()
+
+	if lastEventID != "" {
+		conn.SetLastEventID(lastEventID)
+	}
 
 	c.conn = conn
 	c.setState(StateConnecting)
@@ -141,32 +155,54 @@ func (c *Client) Connect() error {
 
 	eventChan, err := conn.Connect()
 	if err != nil {
+		c.clearConn(conn)
 		c.setState(StateDisconnected)
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	c.setState(StateConnected)
+	// Disconnect may have been called during conn.Connect(). It has already closed conn.
+	c.connMu.Lock()
+	select {
+	case <-done:
+		c.connMu.Unlock()
+		return ErrClientDisconnected
+	default:
+		c.setState(StateConnected)
+	}
+	c.connMu.Unlock()
 
-	go c.handleEvents(eventChan)
+	go c.handleEvents(conn, eventChan, done)
 
 	return nil
 }
 
 // handleEvents processes events from the connection
-func (c *Client) handleEvents(eventChan <-chan sse.Event) {
+func (c *Client) handleEvents(conn *Connection, eventChan <-chan sse.Event, done <-chan struct{}) {
 	for {
 		select {
-		case <-c.done:
+		case <-done:
 			return
 		case event, ok := <-eventChan:
 			if !ok {
 				// Connection closed
-				c.handleDisconnection()
+				c.clearConn(conn)
+				c.handleDisconnection(done)
 				return
 			}
 
 			c.handleEvent(event)
 		}
+	}
+}
+
+// clearConn closes conn and clears c.conn if conn is still the active connection
+func (c *Client) clearConn(conn *Connection) {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+
+	conn.Close()
+	if c.conn == conn {
+		c.conn = nil
 	}
 }
 
@@ -202,33 +238,47 @@ func (c *Client) handleEvent(event sse.Event) {
 }
 
 // handleDisconnection handles connection loss and reconnection
-func (c *Client) handleDisconnection() {
+func (c *Client) handleDisconnection(done <-chan struct{}) {
+	// Disconnect may have been called while the connection was closing. It has already set StateDisconnected.
+	c.connMu.Lock()
+	select {
+	case <-done:
+		c.connMu.Unlock()
+		return
+	default:
+	}
+
 	c.setState(StateDisconnected)
 
-	if !c.options.Reconnect || c.options.MaxRetries <= 0 {
+	reconnect := c.options.Reconnect && c.options.MaxRetries > 0
+	if reconnect {
+		c.setState(StateReconnecting)
+	}
+	c.connMu.Unlock()
+
+	if !reconnect {
 		slog.Info("client disconnected without retry")
 		return
 	}
-
-	c.setState(StateReconnecting)
 
 	// Exponential backoff reconnection
 	backoff := c.options.Backoff
 	retryCount := 0
 
 	for {
+		jitteredBackoff := addJitter(backoff)
 		select {
-		case <-c.done:
+		case <-done:
 			return
-		case <-time.After(addJitter(backoff)):
+		case <-time.After(jitteredBackoff):
 			retryCount++
-			slog.Info("attempting to reconnect", "url", c.url, "backoff", backoff, "jitteredBackoff", addJitter(backoff), "attempt", retryCount)
+			slog.Info("attempting to reconnect", "url", c.url, "backoff", backoff, "jitteredBackoff", jitteredBackoff, "attempt", retryCount)
 
 			if err := c.Connect(); err != nil {
 				slog.Warn("reconnection failed", "error", err, "backoff", backoff, "attempt", retryCount)
 
 				// Check if we've exceeded max retries
-				if c.options.MaxRetries > 0 && retryCount >= c.options.MaxRetries {
+				if retryCount >= c.options.MaxRetries {
 					slog.Warn("max reconnection attempts exceeded", "maxRetries", c.options.MaxRetries)
 					c.setState(StateDisconnected)
 
@@ -238,6 +288,15 @@ func (c *Client) handleDisconnection() {
 					}
 					return
 				}
+
+				// Connect sets StateDisconnected on failure. Restore StateReconnecting unless Disconnect was called.
+				c.connMu.Lock()
+				select {
+				case <-done:
+				default:
+					c.setState(StateReconnecting)
+				}
+				c.connMu.Unlock()
 
 				// Increase backoff for next attempt
 				backoff *= 2
@@ -255,16 +314,15 @@ func (c *Client) handleDisconnection() {
 
 // Disconnect closes the connection
 func (c *Client) Disconnect() {
-	close(c.done)
-
 	c.connMu.Lock()
+	close(c.done)
+	c.done = make(chan struct{})
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
 	}
-	c.connMu.Unlock()
-
 	c.setState(StateDisconnected)
+	c.connMu.Unlock()
 }
 
 // GetState returns the current connection state

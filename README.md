@@ -138,12 +138,10 @@ import (
 
 func main() {
     // Create a new SSE client with custom options
-    sseClient := client.NewClient("http://localhost:8080/events", []string{"notifications"}, client.Options{
-        Reconnect:  true,
-        Backoff:    2 * time.Second,
-        MaxBackoff: 30 * time.Second,
-        MaxRetries: 5, // Give up after 5 attempts
-    })
+    opts := client.DefaultOptions()
+    opts.Backoff = 2 * time.Second
+    opts.MaxRetries = 5 // Give up after 5 attempts
+    sseClient := client.NewClient("http://localhost:8080/events", []string{"notifications"}, opts)
 
     // Set up event handlers
     sseClient.OnMessage(func(event sse.Event) {
@@ -221,21 +219,18 @@ Returns the SSE-formatted string representation of the event.
 ### Client Configuration
 
 #### Options
-The client accepts configuration options when creating a new instance:
+The client accepts configuration options when creating a new instance. `NewClient` uses `DefaultOptions()` when no options are provided. Provided options replace the defaults entirely, so start from `DefaultOptions()` and change the fields you need:
 
 ```go
-client := NewClient("http://localhost:8080/events", []string{"notifications"}, Options{
-    Reconnect:  true,
-    Backoff:    1 * time.Second,
-    MaxBackoff: 30 * time.Second,
-    MaxRetries: 10, // Give up after 10 attempts
-})
+opts := DefaultOptions()
+opts.MaxRetries = 10 // Give up after 10 attempts
+client := NewClient("http://localhost:8080/events", []string{"notifications"}, opts)
 ```
 
 #### Reconnection
 The client supports automatic reconnection with exponential backoff. Configure this through the Options struct when creating the client.
 
-**MaxRetries**: Set to 0 for unlimited retries, or specify a positive number to limit reconnection attempts. When the limit is reached, the error handler will be called with a "max reconnection attempts exceeded" error.
+**MaxRetries**: Set to 0 to disable reconnection, or specify a positive number to limit reconnection attempts. When the limit is reached, the error handler will be called with a "failed to reconnect after N attempts" error.
 
 **Jitter**: The client automatically adds +/- 2% random jitter to backoff delays to prevent multiple clients from reconnecting simultaneously (thundering herd problem).
 

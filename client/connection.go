@@ -25,14 +25,17 @@ type Connection struct {
 	cancel        context.CancelFunc
 }
 
-// NewConnection creates a new SSE connection
-func NewConnection(url string, buffer int, topics ...string) *Connection {
+// NewConnection creates a new SSE connection. If httpClient is nil, a default client is used.
+// httpClient must not set Timeout, as it limits the lifetime of the SSE stream.
+func NewConnection(url string, buffer int, httpClient *http.Client, topics ...string) *Connection {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	if httpClient == nil {
+		httpClient = &http.Client{}
+	}
+
 	return &Connection{
-		client: &http.Client{
-			Timeout: 0, // No timeout for SSE connections
-		},
+		client:  httpClient,
 		url:     url,
 		buffer:  buffer,
 		topics:  topics,

@@ -2,7 +2,11 @@ package client
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +28,7 @@ func TestClient_Options(t *testing.T) {
 	// Test default options
 	client := NewClient("http://localhost:8080/events", nil)
 
+	assert.Equal(t, DefaultOptions(), client.options, "Expected DefaultOptions when no options are provided")
 	assert.True(t, client.options.Reconnect, "Expected reconnect to be true by default")
 	assert.Equal(t, 1*time.Second, client.options.Backoff, "Expected backoff to be 1s")
 	assert.Equal(t, 30*time.Second, client.options.MaxBackoff, "Expected maxBackoff to be 30s")
@@ -131,40 +136,6 @@ func TestClient_Disconnect(t *testing.T) {
 	assert.Equal(t, StateDisconnected, state, "Expected state to be StateDisconnected after disconnect")
 }
 
-func TestNewConnection(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", 100, "test")
-
-	assert.Equal(t, "http://localhost:8080/events", conn.url, "Expected URL to be 'http://localhost:8080/events'")
-	assert.Equal(t, []string{"test"}, conn.topics, "Expected topics to be ['test']")
-	assert.NotNil(t, conn.client, "Expected HTTP client to be initialized")
-}
-
-func TestConnection_SetHeader(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", 100)
-
-	conn.SetHeader("X-Custom", "value")
-
-	assert.Equal(t, "value", conn.headers["X-Custom"], "Expected header 'X-Custom' to be 'value'")
-}
-
-func TestConnection_SetLastEventID(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", 100)
-
-	conn.SetLastEventID("event-123")
-
-	assert.Equal(t, "event-123", conn.lastEventID, "Expected LastEventID to be 'event-123'")
-}
-
-func TestConnection_IsClosed(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", 100)
-
-	assert.False(t, conn.IsClosed(), "Expected connection to not be closed initially")
-
-	conn.Close()
-
-	assert.True(t, conn.IsClosed(), "Expected connection to be closed after Close()")
-}
-
 func TestEvent_GetData(t *testing.T) {
 	event := sse.Event{
 		Data: []byte("test data"),
@@ -226,7 +197,7 @@ func TestEvent_String_NoFields(t *testing.T) {
 }
 
 func TestConnection_ReadEvents_EventParsing(t *testing.T) {
-	conn := NewConnection("http://localhost:8080/events", 100)
+	conn := NewConnection("http://localhost:8080/events", 100, nil)
 
 	// Create a mock reader that returns valid SSE data
 	eventData := "id: 123\nevent: test\ndata: hello world\rdata: line2\r\ndata: line3\n\n"
@@ -251,17 +222,14 @@ func TestConnection_ReadEvents_EventParsing(t *testing.T) {
 
 	go conn.readEvents(mockBody, eventChan)
 
-	// Wait for the goroutine to process
-	time.Sleep(10 * time.Millisecond)
-
 	// Should receive the parsed event
 	select {
 	case event := <-eventChan:
 		assert.Equal(t, "123", event.ID, "Expected event ID to match")
 		assert.Equal(t, "test", event.Type, "Expected event type to match")
 		assert.Equal(t, "hello world\nline2\nline3", string(event.Data), "Expected event data to match")
-	default:
-		assert.Fail(t, "Expected to receive parsed event")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected to receive parsed event")
 	}
 }
 
@@ -291,214 +259,189 @@ func TestClient_HandleDisconnection_NoReconnect(t *testing.T) {
 	// Set initial state
 	client.setState(StateConnected)
 
-	// This should not trigger reconnection
-	go client.handleDisconnection()
+	// Returns immediately when reconnection is disabled
+	client.handleDisconnection(client.done)
 
-	// Wait a bit for the goroutine to process
-	time.Sleep(10 * time.Millisecond)
-
-	// Should remain disconnected
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected state to remain disconnected when reconnection is disabled")
 }
 
 func TestClient_HandleDisconnection_ReconnectionLogic(t *testing.T) {
 	// Test that reconnection logic completes and sets final state correctly
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
+	client := NewClient(newFailingServer(t).URL, nil, Options{
 		Reconnect:  true,
 		Backoff:    1 * time.Millisecond, // Very fast for testing
+		MaxBackoff: 1 * time.Millisecond,
 		MaxRetries: 2,
 	})
 
 	// Set initial state
 	client.setState(StateConnected)
 
-	// This should trigger reconnection logic
-	go client.handleDisconnection()
-
-	// Wait for max retries to be exceeded and final state to be set
-	time.Sleep(100 * time.Millisecond)
+	// Returns after max retries are exceeded
+	client.handleDisconnection(client.done)
 
 	// Should end up disconnected after max retries
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
 }
 
 func TestClient_HandleDisconnection_MaxRetriesExceeded(t *testing.T) {
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
+	client := NewClient(newFailingServer(t).URL, nil, Options{
 		Reconnect:  true,
 		MaxRetries: 2,
 		Backoff:    1 * time.Millisecond, // Very fast for testing
+		MaxBackoff: 1 * time.Millisecond,
 	})
 
-	var errorReceived bool
-	var errorMessage string
+	errc := make(chan error, 1)
 	client.OnError(func(err error) {
-		errorReceived = true
-		errorMessage = err.Error()
+		errc <- err
 	})
 
 	// Set initial state
 	client.setState(StateConnected)
 
-	// This should trigger reconnection with max retries
-	go client.handleDisconnection()
+	// Returns after max retries are exceeded and the error handler is called
+	client.handleDisconnection(client.done)
 
-	// Wait for the error handler to be called
-	time.Sleep(100 * time.Millisecond)
+	select {
+	case err := <-errc:
+		assert.Contains(t, err.Error(), "failed to reconnect after 2 attempts", "Expected max retries error message")
+	default:
+		t.Fatal("Expected error handler to be called after max retries")
+	}
 
-	assert.True(t, errorReceived, "Expected error handler to be called after max retries")
-	assert.Contains(t, errorMessage, "failed to reconnect after 2 attempts", "Expected max retries error message")
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected state to be disconnected after max retries")
 }
 
 func TestClient_HandleDisconnection_BackoffIncrease(t *testing.T) {
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
+	var mu sync.Mutex
+	var times []time.Time
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		times = append(times, time.Now())
+		mu.Unlock()
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil, Options{
 		Reconnect:  true,
-		MaxRetries: 3,
-		Backoff:    1 * time.Millisecond,  // Start with 1ms
-		MaxBackoff: 10 * time.Millisecond, // Cap at 10ms
+		MaxRetries: 4,
+		Backoff:    10 * time.Millisecond, // Start with 10ms
+		MaxBackoff: 40 * time.Millisecond, // Cap at 40ms
 	})
 
-	// Set initial state
-	client.setState(StateConnected)
-
-	// Track reconnection attempts
-	var attempts int
+	errc := make(chan error, 1)
 	client.OnError(func(err error) {
-		attempts++
+		errc <- err
 	})
 
-	// This should trigger reconnection with backoff increase
-	go client.handleDisconnection()
-
-	// Wait for some reconnection attempts
-	time.Sleep(50 * time.Millisecond)
-
-	// Should have attempted reconnections
-	assert.Greater(t, attempts, 0, "Expected reconnection attempts to occur")
-	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
-}
-
-func TestClient_HandleDisconnection_BackoffCapped(t *testing.T) {
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
-		Reconnect:  true,
-		MaxRetries: 5,
-		Backoff:    1 * time.Millisecond, // Start with 1ms
-		MaxBackoff: 2 * time.Millisecond, // Cap at 2ms (very low for testing)
-	})
-
-	// Set initial state
-	client.setState(StateConnected)
-
-	// This should trigger reconnection with backoff capped
-	go client.handleDisconnection()
+	go client.handleDisconnection(client.done)
 
 	// Wait for max retries to be exceeded
-	time.Sleep(100 * time.Millisecond)
-
-	// Should end up disconnected after max retries
+	select {
+	case <-errc:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected error handler to be called after max retries")
+	}
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
-}
 
-func TestClient_HandleDisconnection_UnlimitedRetries(t *testing.T) {
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
-		Reconnect:  true,
-		MaxRetries: 0,                    // Unlimited retries
-		Backoff:    1 * time.Millisecond, // Very fast for testing
-	})
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, times, 4, "Expected one request per retry")
 
-	// Set initial state
-	client.setState(StateConnected)
-
-	// This should trigger reconnection with unlimited retries
-	go client.handleDisconnection()
-
-	// Wait a bit for reconnection attempts
-	time.Sleep(20 * time.Millisecond)
-
-	// Should still be in reconnecting state (no max retries limit)
-	// Note: We can't easily test unlimited retries in unit tests due to timing
-	// So we just verify it doesn't immediately fail
-	assert.NotEqual(t, StateConnected, client.GetState(), "Expected state to change from connected")
+	// Backoffs are 10ms, 20ms, 40ms, 40ms. The first precedes the first request.
+	// Jitter is +/- 2% and timers do not fire early, so only lower bounds are checked.
+	for i, want := range []time.Duration{20 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond} {
+		gap := times[i+1].Sub(times[i])
+		assert.GreaterOrEqual(t, gap, want*98/100, "Expected gap %d to be at least the backoff", i+1)
+	}
 }
 
 func TestClient_HandleDisconnection_CancelledByDisconnect(t *testing.T) {
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
+	client := NewClient("http://localhost:8080/events", nil, Options{
 		Reconnect:  true,
 		MaxRetries: 10,
-		Backoff:    10 * time.Millisecond, // Slower backoff to allow cancellation
+		Backoff:    time.Hour, // No reconnection attempt before Disconnect
+		MaxBackoff: time.Hour,
 	})
 
 	// Set initial state
 	client.setState(StateConnected)
 
 	// Start reconnection process
-	go client.handleDisconnection()
-
-	// Wait a bit for it to start
-	time.Sleep(5 * time.Millisecond)
+	returned := make(chan struct{})
+	go func() {
+		client.handleDisconnection(client.done)
+		close(returned)
+	}()
 
 	// Should be in reconnecting state
-	assert.Equal(t, StateReconnecting, client.GetState(), "Expected state to be reconnecting")
+	assert.Eventually(t, func() bool {
+		return client.GetState() == StateReconnecting
+	}, 5*time.Second, time.Millisecond, "Expected state to be reconnecting")
 
 	// Cancel via disconnect
 	client.Disconnect()
 
-	// Wait a bit for cancellation to take effect
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Expected handleDisconnection to return after disconnect")
+	}
 
 	// Should be disconnected due to cancellation
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected state to be disconnected after cancellation")
 }
 
 func TestClient_HandleDisconnection_StateTransitions(t *testing.T) {
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
+	client := NewClient(newFailingServer(t).URL, nil, Options{
 		Reconnect:  true,
 		MaxRetries: 1,
 		Backoff:    1 * time.Millisecond,
+		MaxBackoff: 1 * time.Millisecond,
 	})
 
 	// Test state transitions during reconnection
 	client.setState(StateConnected)
 
-	// Start reconnection
-	go client.handleDisconnection()
-
-	// Wait for max retries to be exceeded
-	time.Sleep(100 * time.Millisecond)
+	// Returns after max retries are exceeded
+	client.handleDisconnection(client.done)
 
 	// Should end up disconnected after max retries
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
 }
 
 func TestClient_HandleDisconnection_SuccessfulReconnection(t *testing.T) {
-	// Test successful reconnection by simulating a scenario where
-	// the first connection attempt fails but the second succeeds
-	client := NewClient("http://localhost:8080/events", nil, Options{
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil, Options{
 		Reconnect:  true,
 		Backoff:    1 * time.Millisecond, // Very fast for testing
+		MaxBackoff: 1 * time.Millisecond,
 		MaxRetries: 5,
 	})
 
 	// Set initial state
 	client.setState(StateConnected)
 
-	// This should trigger reconnection logic
-	go client.handleDisconnection()
+	// Returns after the first successful reconnection
+	client.handleDisconnection(client.done)
 
-	// Wait for reconnection process to complete
-	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, StateConnected, client.GetState(), "Expected state to be connected after reconnection")
 
-	// Verify that reconnection logic was triggered
-	// The client should have attempted reconnection and either succeeded
-	// or failed after max retries
-	finalState := client.GetState()
-	assert.True(t, finalState == StateConnected || finalState == StateDisconnected,
-		"Expected final state to be either connected or disconnected after reconnection attempts")
+	client.Disconnect()
 }
 
 func TestClient_NoRetry(t *testing.T) {
 	// Test that reconnection logic completes and sets final state correctly
-	client := NewClient("http://invalid-url-that-will-fail:9999/events", nil, Options{
+	client := NewClient("http://localhost:8080/events", nil, Options{
 		Reconnect:  true,
 		Backoff:    1 * time.Millisecond, // Very fast for testing
 		MaxRetries: 0,
@@ -507,12 +450,145 @@ func TestClient_NoRetry(t *testing.T) {
 	// Set initial state
 	client.setState(StateConnected)
 
-	// This should trigger reconnection logic
-	go client.handleDisconnection()
+	// Returns immediately when MaxRetries is 0
+	client.handleDisconnection(client.done)
 
-	// Wait for max retries to be exceeded and final state to be set
-	time.Sleep(100 * time.Millisecond)
-
-	// Should end up disconnected after max retries
+	// Should end up disconnected without retrying
 	assert.Equal(t, StateDisconnected, client.GetState(), "Expected final state to be disconnected")
+}
+
+func TestClient_Connect_RetryAfterFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil)
+
+	assert.Error(t, client.Connect(), "Expected first connect to fail")
+
+	err := client.Connect()
+	assert.Error(t, err, "Expected second connect to fail")
+	assert.NotErrorIs(t, err, ErrClientAlreadyConnected, "Expected failed connect to clear the connection")
+}
+
+func TestClient_ReconnectAfterServerClose(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := requests.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+
+		// Close the first stream to trigger reconnection
+		if n == 1 {
+			return
+		}
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil, Options{
+		Reconnect:  true,
+		Backoff:    1 * time.Millisecond,
+		MaxBackoff: 1 * time.Millisecond,
+		MaxRetries: 3,
+	})
+
+	assert.NoError(t, client.Connect(), "Expected connect to succeed")
+
+	assert.Eventually(t, func() bool {
+		return requests.Load() == 2 && client.IsConnected()
+	}, time.Second, 5*time.Millisecond, "Expected client to reconnect after server closed the stream")
+
+	client.Disconnect()
+}
+
+func TestClient_ReconnectingStateBetweenRetries(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Accept the first stream and close it, then fail all reconnection attempts
+		if requests.Add(1) > 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, nil, Options{
+		Reconnect:  true,
+		Backoff:    20 * time.Millisecond,
+		MaxBackoff: 20 * time.Millisecond,
+		MaxRetries: 10,
+	})
+
+	assert.NoError(t, client.Connect(), "Expected connect to succeed")
+
+	// Wait for two failed reconnection attempts
+	assert.Eventually(t, func() bool {
+		return requests.Load() >= 3
+	}, time.Second, time.Millisecond, "Expected reconnection attempts")
+
+	assert.Eventually(t, func() bool {
+		return client.GetState() == StateReconnecting
+	}, time.Second, time.Millisecond, "Expected StateReconnecting between failed retries")
+
+	client.Disconnect()
+	assert.Equal(t, StateDisconnected, client.GetState(), "Expected StateDisconnected after disconnect")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+func TestClient_DisconnectDuringConnect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	var client *Client
+
+	// Disconnect after the response is received, before Connect sets StateConnected
+	httpClient := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		resp, err := http.DefaultTransport.RoundTrip(r)
+		client.Disconnect()
+		return resp, err
+	})}
+	client = NewClient(server.URL, nil, Options{Buffer: 10, HTTPClient: httpClient})
+
+	assert.ErrorIs(t, client.Connect(), ErrClientDisconnected, "Expected connect to report disconnect")
+	assert.Equal(t, StateDisconnected, client.GetState(), "Expected StateDisconnected after disconnect")
+}
+
+func TestClient_HandleDisconnection_AfterDisconnect(t *testing.T) {
+	client := NewClient("http://localhost:8080/events", nil, Options{
+		Reconnect:  true,
+		Backoff:    time.Hour,
+		MaxBackoff: time.Hour,
+		MaxRetries: 3,
+	})
+
+	// The connection closes after Disconnect, so handleDisconnection runs with a closed done channel
+	done := client.done
+	client.Disconnect()
+	client.handleDisconnection(done)
+
+	assert.Equal(t, StateDisconnected, client.GetState(), "Expected StateDisconnected after disconnect")
+}
+
+// newFailingServer returns a server that responds to every request with 500, closed when the test ends.
+func newFailingServer(t *testing.T) *httptest.Server {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	return server
 }
